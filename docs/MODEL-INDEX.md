@@ -9,6 +9,8 @@ Status legend: ✅ actively maintained (recently verified) · 📦 archived exam
 ## GLM-5.2 (`zai-org/GLM-5.2-FP8`, 753B MoE)
 
 Benchmarked head-to-head in [GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md).
+KV-cache offload & externalization (HiCache / LMCache / Redis L2) measured in
+[KV-CACHE-ARCHITECTURE.md](KV-CACHE-ARCHITECTURE.md).
 
 | Shape | Manifest | Instances | Status |
 |---|---|---|---|

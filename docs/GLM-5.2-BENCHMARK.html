@@ -87,7 +87,7 @@
   </div>
 
   <!-- ============ 3. KV offload A/B ============ -->
-  <h2>3 · KV-cache offload to host RAM — engine A/B (single node)</h2>
+  <h2>3 · KV-cache offload to host RAM — engine × backend (single node)</h2>
   <p class="sub">Long-document reuse: 8 users × ~30K-token docs, concurrency 8, re-asked after GPU-pool eviction.
      Cold = full prefill; Hot = reload from host RAM. Lower is better.</p>
   <div class="card">
@@ -97,10 +97,14 @@
     </div>
     <div id="c3"></div>
     <p class="chart-note">Same hardware, same fp8 KV, same workload — only the offload implementation differs.
-       SGLang HiCache reloads the full 240K-token working set from host RAM
-       (<span class="pill good">8.1× faster TTFT</span>, log-verified 100% cache hit); vLLM's native
-       OffloadingConnector barely hits (<span class="pill bad">2.5% hit rate</span>). vLLM's documented
-       remedy is the <code>lmcache</code> offload backend (untested — round B).</p>
+       <b>vLLM + LMCache wins outright</b> (<span class="pill good">22× faster TTFT</span>, wall 30×) — its MP
+       server maps engine GPU KV via CUDA IPC and retrieves 30K tokens in 6ms; SGLang HiCache reloads over the
+       paged host↔device path (<span class="pill good">8.1×</span>, log-verified 100% hit); vLLM's native
+       OffloadingConnector barely hits (<span class="pill bad">2.5% hit rate</span>) — superseded by lmcache.
+       <b>SGLang + LMCache: incompatible with GLM-5.2</b> (DSA fused <code>kv_buffer</code> vs the adapter's
+       <code>k_buffer</code>/<code>v_buffer</code> assumption; known upstream, unfixed — sglang#15739, LMCache#2636).
+       Ops note: the lmcache MP server must run <b>in the same container</b> as the engine — CUDA IPC fails
+       across container boundaries.</p>
   </div>
 
   <!-- ============ 4. Offload on PD vs single node ============ -->
@@ -112,6 +116,24 @@
        once prefill compute is removed — offload gains vanish (~1.0×). On a single node there is no transfer floor,
        so the full prefill saving lands (10.4× wall-clock on this working set).
        Capacity rule: benefit is binary — working set must fit the host pool, or LRU eviction zeroes it.</p>
+  </div>
+
+  <!-- ============ 5. Decode-heavy rematch ============ -->
+  <h2>5 · Decode-heavy rematch: PD 1P+1D on its home turf (1K-in / 4K-out)</h2>
+  <p class="sub">2026-07-08. All prior shape runs were prefill-heavy (8K/1K), which disadvantages PD.
+     Workload inverted to 1K-in / 4K-out — short prompts, long generations — where decode purity should shine.
+     sglang.bench_serving, thinking off. Higher is better.</p>
+  <div class="card">
+    <div class="legend">
+      <span><span class="sw" style="background:var(--series-1)"></span>1-node TP8 (baseline)</span>
+      <span><span class="sw" style="background:var(--series-3)"></span>PD 1P+1D, 2 nodes (challenger)</span>
+    </div>
+    <div id="c5"></div>
+    <p class="chart-note"><b>PD lost its home game.</b> −32%/−27% output throughput at c20/c40 while using
+       2× the nodes (≈37% per-node efficiency); TTFT p50 4–5× worse (424ms→2.3s at c20); ITL mean 37–49% slower
+       (19.7→29.3ms). The one promise PD kept: near-zero ITL variance (c40 p99 36.25 vs median 35.18ms) and halved
+       max-ITL spikes (141 vs 400ms) — decode is never interrupted by prefill. But no realistic SLO trades a permanent
+       37% ITL regression for spike removal. <b>Both workload extremes now measured; 1-node TP8 wins both.</b></p>
   </div>
 
   <!-- ============ Data table ============ -->
@@ -130,6 +152,11 @@
         <tr><td>L3</td><td>2-node TP16 LWS+EFA</td><td>(same)</td><td class="num">40</td><td class="num">1,230</td><td class="num">41.1</td><td class="num">730</td><td>✅</td></tr>
         <tr><td>P1</td><td>2-node PD 1P+1D NIXL</td><td>both TP8, mem 0.85</td><td class="num">20</td><td class="num">11,560</td><td class="num">25.0</td><td class="num">356</td><td>✅</td></tr>
         <tr><td>P2</td><td>2-node PD 1P+1D NIXL</td><td>(bench_serving)</td><td class="num">40</td><td class="num">17,246</td><td class="num">31.7</td><td class="num">712</td><td>✅</td></tr>
+        <tr><td colspan="8" style="color:var(--text-muted);font-size:12px">Decode-heavy campaign (1K-in / 4K-out, 2026-07-08) — output tok/s shown:</td></tr>
+        <tr><td>D1</td><td>1-node TP8 SGLang</td><td>committed config, 1K/4K</td><td class="num">20</td><td class="num">424</td><td class="num">19.7</td><td class="num">987</td><td>✅</td></tr>
+        <tr><td>D2</td><td>1-node TP8 SGLang</td><td>(same)</td><td class="num">40</td><td class="num">309</td><td class="num">25.7</td><td class="num">1,521</td><td>✅</td></tr>
+        <tr><td>D3</td><td>2-node PD 1P+1D NIXL</td><td>1K/4K via router</td><td class="num">20</td><td class="num">2,272</td><td class="num">29.3</td><td class="num">672</td><td>✅</td></tr>
+        <tr><td>D4</td><td>2-node PD 1P+1D NIXL</td><td>(same)</td><td class="num">40</td><td class="num">1,370</td><td class="num">35.2</td><td class="num">1,114</td><td>✅</td></tr>
       </tbody>
     </table>
     <details>
@@ -139,6 +166,8 @@
         <tbody>
           <tr><td>SGLang v0.5.13</td><td>HiCache ratio=2 (~330GB host)</td><td class="num">17.9 s</td><td class="num">2.2 s</td><td class="num">8.1×</td><td>#cached-token: 245K (100%)</td></tr>
           <tr><td>vLLM v0.24</td><td>native, 400 GiB</td><td class="num">17.6 s</td><td class="num">14.8 s</td><td class="num">1.14×</td><td>prefix hit rate 2.5%</td></tr>
+          <tr><td>vLLM v0.24</td><td>lmcache 0.5.0, 400 GiB L1, in-container MP server</td><td class="num">17.5 s</td><td class="num">0.79 s</td><td class="num">22×</td><td>Retrieved 30720 tokens in 0.006s ×8</td></tr>
+          <tr><td>SGLang v0.5.13</td><td>--enable-lmcache (lmcache 0.5.1)</td><td class="num">—</td><td class="num">—</td><td class="num">❌</td><td>DSATokenToKVPool lacks k_buffer — upstream unfixed (sglang#15739)</td></tr>
           <tr><td>SGLang (PD prefill side)</td><td>HiCache ratio=2</td><td class="num">21.5 s (c20)</td><td class="num">21.1 s</td><td class="num">~1.0×</td><td>100% hit, gain absorbed by P→D transfer</td></tr>
         </tbody>
       </table>
@@ -244,7 +273,8 @@ hbar(document.getElementById('c2'), [
 
 // 3 · offload A/B (cold vs hot)
 hbar2(document.getElementById('c3'), [
-  {label:'SGLang + HiCache', a:17.9, b:2.2, badge:'← 8.1×', noteA:'full prefill 8×30K docs', noteB:'100% host-cache hit (log-verified)'},
+  {label:'vLLM + LMCache', a:17.5, b:0.79, badge:'← 22×', noteA:'full prefill 8×30K docs', noteB:'CUDA-IPC retrieve: 30K tokens in 6ms'},
+  {label:'SGLang + HiCache', a:17.9, b:2.2, badge:'8.1×', noteA:'full prefill 8×30K docs', noteB:'100% host-cache hit (log-verified)'},
   {label:'vLLM + native offload', a:17.6, b:14.8, badge:'1.14×', noteA:'full prefill', noteB:'prefix hit rate only 2.5%'},
 ], {maxV:20, fmtV:v=>v.toFixed(1), unit:'s'});
 
@@ -253,6 +283,17 @@ hbar(document.getElementById('c4'), [
   {label:'Single-node TP8 (no transfer floor)', value:10.4, note:'wall-clock speedup, 8×30K working set', color:css('--series-2')},
   {label:'PD 1P+1D (P→D transfer dominates)', value:1.0, note:'100% cache hit but no end-to-end gain', color:css('--series-3')},
 ], {maxV:12, fmt:v=>v.toFixed(1), unit:'×'});
+
+// 5 · decode-heavy rematch: TP8 vs PD output throughput at c20/c40
+(function(){
+  const cA = css('--series-1'), cB = css('--series-3');
+  hbar(document.getElementById('c5'), [
+    {label:'c20 · 1-node TP8', value:987, color:cA, note:'TTFT p50 424ms · ITL 19.7ms'},
+    {label:'c20 · PD 1P+1D (2 nodes)', value:672, color:cB, note:'TTFT p50 2,272ms · ITL 29.3ms · −32% on 2× nodes'},
+    {label:'c40 · 1-node TP8', value:1521, color:cA, note:'TTFT p50 309ms · ITL 25.7ms'},
+    {label:'c40 · PD 1P+1D (2 nodes)', value:1114, color:cB, note:'TTFT p50 1,370ms · ITL 35.2ms · −27% on 2× nodes'},
+  ], {maxV:1600, fmt:v=>Math.round(v), unit:' tok/s'});
+})();
 </script>
 </body>
 </html>

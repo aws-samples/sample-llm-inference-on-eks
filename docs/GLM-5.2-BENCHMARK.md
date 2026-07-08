@@ -1,9 +1,17 @@
 # GLM-5.2-FP8 on EKS p5en.48xlarge — Benchmark Report
 
-**Date**: 2026-07-07
+**Date**: 2026-07-07 → 07-08
 **Model**: `zai-org/GLM-5.2-FP8` — 753B MoE (DSA sparse attention, 256 experts/top-8, 1 MTP layer), FP8 weights ~756 GB
 **Hardware**: p5en.48xlarge (8× H200 141 GB, 16× EFA), Karpenter `reserved-capacity-pool` (us-west-2d capacity block)
-**Load generator**: NVIDIA genai-perf 0.0.16.post1 (Triton 26.06 SDK pod, in-cluster); `sglang.bench_serving` for the final PD run (genai-perf SSE parser fails against the router at concurrency 40)
+**Load generator**: NVIDIA genai-perf 0.0.16.post1 (Triton 26.06 SDK pod, in-cluster); `sglang.bench_serving` for PD-router runs and all decode-heavy runs (genai-perf SSE parser fails against the router at concurrency 40)
+
+The report covers three experiment campaigns, each with its own question:
+
+| Campaign | Question | Section |
+|---|---|---|
+| Deployment shapes (07-07) | Which of 4 shapes serves a prefill-heavy 8K/1K workload best? | Executive Summary, Findings |
+| KV offloading (07-08) | Does host-RAM KV offload pay, on which shape, and which engine does it better? | § KV-cache offloading |
+| Decode-heavy rematch (07-08) | Does PD 1P+1D win on its theoretical home turf (1K/4K)? | § Decode-heavy workload |
 
 ## Workload
 
@@ -41,7 +49,7 @@ Six configurations were benchmarked across four deployment shapes. Key numbers (
 | Max throughput per dollar | **2× independent TP8 replicas** (extrapolated ~912 tok/s) | No cross-node allreduce tax; each node at full efficiency. *Not yet measured — see Open Items.* |
 | Hard TTFT SLO at high concurrency | **2-node TP16 (LWS + EFA)** | Only shape with TTFT p99 < 2.5 s at concurrency 40 |
 | Low concurrency / single-node budget | 1-node TP8, SGLang or vLLM (they tie) | ~455 tok/s wall; fine for ≤10 concurrent 8K requests |
-| Strict ITL SLO or decode-heavy workloads | PD disaggregation (needs ≥2P:1D here) | ITL p99 27.5 ms is untouchable, but 1P:1D inverts this workload's needs |
+| Strict ITL SLO or decode-heavy workloads | ~~PD disaggregation~~ **1-node TP8** | PD 1P+1D lost the decode-heavy rematch too (see § Decode-heavy workload); its only surviving edge is ITL *variance*, at a 37% ITL-mean cost |
 
 ## Findings
 
@@ -72,7 +80,7 @@ At concurrency 20, TP16 was *worse* than TP8 (396 vs 456 tok/s): 16 GPUs under-f
 
 ### 6. PD 1P:1D is the wrong ratio for an 8:1 ISL:OSL workload
 
-PD delivered its core promise — decode purity (ITL p99 27.5 ms, max 108 ms; per-user floor 36 tok/s) — but at concurrency 40 the single prefill node became the whole bottleneck: TTFT median 17 s, p99 53 s, while the decode node idled (peak output 1013 tok/s vs 712 sustained shows the spare capacity). Input throughput matched TP16 (~5.6K tok/s), confirming equal total compute — PD just partitions it statically, and this workload needs most of it on prefill. PD suits decode-heavy traffic or extreme ITL SLOs, and would need ≥2P:1D (3 nodes) here.
+PD delivered its core promise — decode purity (ITL p99 27.5 ms, max 108 ms; per-user floor 36 tok/s) — but at concurrency 40 the single prefill node became the whole bottleneck: TTFT median 17 s, p99 53 s, while the decode node idled (peak output 1013 tok/s vs 712 sustained shows the spare capacity). Input throughput matched TP16 (~5.6K tok/s), confirming equal total compute — PD just partitions it statically, and this workload needs most of it on prefill. At the time we hypothesized PD might still win on decode-heavy traffic — tested on 07-08, see § Decode-heavy workload: it does not.
 
 ### 7. Engine scheduling styles differ where the wall doesn't
 
@@ -98,63 +106,77 @@ GLM-5.2 requires SGLang ≥ v0.5.13.post1 (`glm_moe_dsa` arch) and transformers 
 | TP16 OOM under load | c20 benchmark, ~4 min in | 0.85 static pool absorbs TP16 weight savings into KV | mem 0.80 |
 | genai-perf c40 failures ×2 | router streaming at c40 | genai-perf 0.0.16 SSE parser (`splintered SSE`, `orjson` error); backends healthy | use `sglang.bench_serving` |
 
-## KV-cache offloading (HiCache / vLLM OffloadingConnector) — 2026-07-08
+## KV-cache offloading — 2026-07-08 (summary; full doc: KV-CACHE-ARCHITECTURE.md)
 
-Follow-up experiments on host-RAM KV offload, run on the same two CB nodes before expiry.
-Scenario: **long-document reuse** — N users × ~30K-token documents, re-asked after the GPU
-KV pool has been flooded/evicted. `max_tokens=1` isolates prefill (≈TTFT). All fp8 KV.
+A separate experiment campaign measured KV-cache offload and externalization on the same
+nodes. Full methodology, architecture diagrams, and per-experiment data live in
+**[KV-CACHE-ARCHITECTURE.md](KV-CACHE-ARCHITECTURE.md)**. Headlines:
 
-### On PD-disaggregation (prefill side, HiCache ratio=2)
+- **Long-document reuse (30K-token docs, re-asked after GPU eviction)**: host-RAM reload
+  beats recompute by **22×** (vLLM + LMCache, CUDA-IPC path), **8.1×** (SGLang HiCache),
+  1.14× (vLLM native connector — superseded by lmcache).
+- **SGLang + LMCache is incompatible with GLM-5.2** (DSA fused `kv_buffer` vs the
+  adapter's `k_buffer` assumption; upstream-confirmed, unfixed — sglang#15739). SGLang's
+  correct path is HiCache (the only DSA-indexer-aware offload).
+- **Externalized L2 (Redis as its own Deployment)** verified: KV survives pod death
+  (4.07s vs 7.11s cold) and **crosses instances** (A computes → B consumes, 3.90s vs
+  6.47s cold). L2's network constant ≈ 3s/30K tokens → break-even at ~10K-token inputs.
+- **On PD**: L1 offload does *not* help the current request (P→D transfer floor), but a
+  shared L2 removes the multi-turn history-recompute cost on P. Current-request hand-off
+  stays on NIXL/EFA; the store serves the cross-request timeline.
+- Benefit is binary on capacity (working set ≤ pool or nothing); caches add no measurable
+  cold-path overhead; ITL/TPOT are unaffected — throughput gains are indirect (freed
+  prefill capacity) and not yet measured.
 
-| Test | Result |
-|---|---|
-| Single request, hot vs cold | TTFT 1.78s vs 2.61s (**-32%**), log-verified `#cached-token: 10240` |
-| Concurrency 20, hot vs cold | **no gain** (~4%), even with 100% host-cache hit |
-| Same test with bf16 KV (JIT HiCache kernel healthy) | still no gain → JIT fallback ruled out |
+## Decode-heavy workload: PD 1P+1D rematch — 2026-07-08
 
-**Why**: offload accelerates *prefill compute* only; in PD every request still pays the
-P→D KV transfer + bootstrap handshake, which dominates at high concurrency with
-`max_tokens=1`. bf16 cold rounds ran ~50% slower than fp8 (51s vs 33s wall) — the
-KV-transfer volume is a first-order cost in PD, so **fp8 KV is doubly valuable there**.
+**Question.** All 07-07 runs used a prefill-heavy profile (8K-in/1K-out), which structurally
+disadvantages a 1P+1D split. Does PD win when the workload is inverted to its theoretical
+home turf — short prompts, long generations, where decode purity should shine?
 
-### On single-node TP8 (the shape where offload pays off)
+**Experiment.** Same two CB nodes, same fp8-KV configs. Workload flipped to
+**1K-in / 4K-out** (`sglang.bench_serving`, random dataset, thinking off). Two shapes:
 
-8 users × 30K-token docs, concurrency 8, flood sized to evict GPU but **fit in host pool**:
+- *Baseline*: 1-node TP8 SGLang (the committed `glm-5.2-fp8-p5en.yaml` config)
+- *Challenger*: PD 1P+1D over NIXL/EFA (`lws-glm-5.2-pd-p5en.yaml` + sglang-router)
 
-| Engine | Offload config | Cold TTFT avg | Hot TTFT avg | Speedup | Hit evidence |
-|---|---|---|---|---|---|
-| SGLang v0.5.13 | HiCache `ratio=2` (~330GB host) | 17.9s | **2.2s** | **8.1×** (wall 10.4×) | `#cached-token: 245K` = 100% reload |
-| vLLM v0.24 | native `--kv-offloading-size=400` | 17.6s | 14.8s | 1.14× | `prefix cache hit rate: 2.5%` |
+each at concurrency 20 (60 prompts) and 40 (120 prompts).
 
-Cold prefill performance is equal between engines; the offload implementations are not:
-**SGLang HiCache delivers ~8-10×; vLLM's native OffloadingConnector barely hits** (with
-fp8-KV + MTP at least). vLLM's documented path for serious offload is
-`--kv-offloading-backend=lmcache` — untested here (image lacks lmcache).
+**Results.**
 
-### Sizing rule (validated the hard way)
+| Metric | TP8 c20 | PD c20 | TP8 c40 | PD c40 |
+|---|---|---|---|---|
+| Output throughput (tok/s) | **987** | 672 | **1,521** | 1,114 |
+| — per node | **987** | 336 | **1,521** | 557 |
+| TTFT p50 (ms) | **424** | 2,272 | **309** | 1,370 |
+| ITL mean (ms) | **19.7** | 29.3 | **25.7** | 35.2 |
+| ITL p99 (ms) | 36.4 | **31.0** | 36.4* | **36.3** |
+| Max ITL (ms) | 400 | **220** | — | **141** |
+| E2E median (s) | **78.7** | 118.6 | **102.6** | 141.6 |
 
-Offload benefit is binary on capacity: **working set ≤ host pool → ~10×; overflow → zero**.
-An earlier run flooded 720K tokens into an 805K-token host pool alongside a 240K working
-set — the working set was LRU-evicted from host too, and the hot round showed no benefit
-(`#cached-token: 0` across the board). Size `hicache-ratio` / `kv-offloading-size` from
-*active users × context length*; p5en has ~2TB RAM, so ratio 4–6 is realistic.
+\* single-node c40 p95/p99 ITL not captured separately; mean/TPOT p99 28.5 ms.
 
-### Operational notes
+**Conclusion — PD 1P+1D has no applicable regime on this model/hardware.**
+It lost on its home turf: −32%/−27% throughput (c20/c40) while consuming 2× the nodes
+(≈37% per-node efficiency), TTFT 4–5× worse, ITL mean 37–49% slower. The one promise PD
+kept is ITL *smoothness* — its ITL distribution is near-zero-variance (c40: p99 36.25 vs
+median 35.18) and max-ITL spikes halve (141 vs 400 ms) because decode is never interrupted
+by prefill. But that trades a permanent 37% ITL-mean regression for the removal of
+occasional spikes — no realistic SLO prefers that. Combined with the 07-07 prefill-heavy
+result, both workload extremes are now measured, and 1-node TP8 wins both. PD's remaining
+untested chances are structural, not workload-shaped: asymmetric xP:yD scaling at fleet
+size, or a shared KV store that removes the per-request P→D push (Open items 2/4).
 
-- sglang-router circuit-breaker does **not** auto-recover after a prefill restart —
-  restart the router deployment (`kubectl rollout restart deploy/<router>`).
-- fp8 KV triggers `Unsupported element_size = 656 for JIT HiCache kernel` (generic-path
-  fallback for host↔device copies). Benefit was still 8× despite it; bf16 avoids the
-  warning but halves both KV pools — keep fp8.
-- Manifests carry the offload flags: `sglang/glm-5.2-fp8-p5en.yaml` (HiCache),
-  `vllm/glm-5.2-fp8-p5en-vllm.yaml` (native offload; swap backend to `lmcache` for round B).
+Corollary: the decode-heavy numbers also strengthen the un-measured "2× TP8 + LB"
+recommendation — a single TP8 node already sustains 1,521 tok/s at c40 with sub-second
+median TTFT on this profile.
 
 ## Open items
 
-1. **2× TP8 replicas at c40** — the throughput-per-dollar favorite is extrapolated (456 × 2 ≈ 912 tok/s), not measured. Requires freeing the PD nodes and scaling `glm-5-2` to `replicas: 2`.
-2. PD at 2P:1D ratio (3 nodes) if a decode-pure + low-TTFT profile is ever required.
+1. **2× TP8 replicas at c40** — the throughput-per-dollar favorite is extrapolated (456 × 2 ≈ 912 tok/s on 8K/1K; ~3,000 tok/s on 1K/4K), not measured. Requires freeing the PD nodes and scaling `glm-5-2` to `replicas: 2`.
+2. PD at 2P:1D ratio (3 nodes) — the last untested PD configuration, only relevant if fleet-level asymmetric scaling is on the table (1P+1D is ruled out for both workload shapes).
 3. MTP acceptance-length telemetry was not collected; draft-token tuning was done on cookbook guidance, not measured accept rates.
-4. **LMCache (round B)**: vLLM `--kv-offloading-backend=lmcache` (image needs `pip install lmcache`), sglang `--enable-lmcache`; and the architectural variant worth testing for PD — decode reading from a shared KV store (Mooncake) instead of per-request P→D push.
+4. ~~LMCache (round B)~~ **done 07-08** (vLLM 22× ✅, sglang incompatible ❌ — see § KV-cache offloading). Still open from it: LMCache **L2 remote backend** (Redis/Mooncake) for cross-node sharing, and the PD variant — decode reading from a shared KV store instead of per-request P→D push.
 5. HiCache `ratio=4–6` on p5en (2TB RAM) for larger working sets; and `hicache-storage-backend` (L3: file/mooncake/nixl) for cross-restart persistence.
 
 ## Reproduce

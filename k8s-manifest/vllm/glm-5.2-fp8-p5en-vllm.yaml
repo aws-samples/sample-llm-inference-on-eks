@@ -35,8 +35,16 @@ spec:
       - name: glm
         image: vllm/vllm-openai:v0.24.0 # GLM-5.2 needs vLLM >= 0.23
         imagePullPolicy: IfNotPresent
-        command: [ "vllm", "serve" ]
+        # lmcache MP server must share the engine's IPC namespace (it maps the
+        # engine's GPU KV tensors via CUDA IPC — a plain sidecar container fails
+        # with "mapping of buffer object failed"), so launch it in-container.
+        command: [ "bash", "-c" ]
         args:
+        - |
+          lmcache server --l1-size-gb 400 --eviction-policy LRU &
+          sleep 5
+          exec vllm serve "$@"
+        - vllm
         - zai-org/GLM-5.2-FP8
         - --host=0.0.0.0
         - --port=8000
@@ -48,9 +56,16 @@ spec:
         # vLLM default 0.9 OOM-crashed sglang's equivalent under load; stay at 0.85
         - --gpu-memory-utilization=0.85
         # KV offload to host RAM — vLLM's HiCache equivalent. 400GiB total across
-        # TP ranks (~50GiB/rank), comparable to sglang hicache-ratio=2
+        # TP ranks (~50GiB/rank), comparable to sglang hicache-ratio=2.
+        # Backend: lmcache (image ships lmcache 0.5.0) — measured 22x hot-reload vs
+        # 1.14x for the native OffloadingConnector on the same workload; full A/B and
+        # architecture in docs/KV-CACHE-ARCHITECTURE.md.
+        # NOTE: lmcache backend uses the MP architecture — the cache lives in a
+        # separate `lmcache server` process (ZMQ, tcp://localhost:5555), launched
+        # in-container by the command above. It survives engine process restarts;
+        # add an --l2-adapter (e.g. Redis) for cross-pod/cross-node sharing.
         - --kv-offloading-size=400
-        - --kv-offloading-backend=native
+        - --kv-offloading-backend=lmcache
         # MTP speculative decoding, per recipe (sglang uses EAGLE over the same MTP head)
         - --speculative-config={"method":"mtp","num_speculative_tokens":5}
         # thinking / tool-call parsing (same parsers as sglang)
