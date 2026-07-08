@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-r1
+  labels:
+    app: deepseek-r1
+    engine: sglang
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepseek-r1
+      engine: sglang
+  template:
+    metadata:
+      labels:
+        app: deepseek-r1
+        model: deepseek-r1
+        engine: sglang
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p5en.48xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: deepseek
+        image: docker.io/lmsysorg/sglang:v0.5.13.post1
+        imagePullPolicy: Always # IfNotPresent or Never
+        command: [ "python3", "-m", "sglang.launch_server" ]
+        args: [ 
+          "--model-path", "deepseek-ai/DeepSeek-R1", 
+          "--host", "0.0.0.0", "--port", "8000", 
+          "--context-length", "4096", 
+          "--tensor-parallel-size", "8", 
+          "--mem-fraction-static", "0.9", 
+          "--disable-custom-all-reduce", 
+          "--enable-flashinfer-mla", 
+          "--quantization", "fp8", 
+          "--trust-remote-code", 
+          "--enable-p2p-check", 
+          "--enable-nccl-nvls",
+          "--enable-ep-moe", 
+        ]
+        env:
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_P2P_DISABLE
+          value: "0"
+        - name: NCCL_P2P_LEVEL
+          value: "NVL"
+        - name: NCCL_NVLS_ENABLE
+          value: "1"
+        - name: TORCH_USE_CUDA_DSA
+          value: "1"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "100"
+            memory: 1124Gi
+            ephemeral-storage: 800Gi
+            nvidia.com/gpu: "8"
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /mnt/k8s-disks/0/models/deepseek
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "500Gi"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-r1
+spec:
+  selector:
+    app: deepseek-r1
+    engine: sglang
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP

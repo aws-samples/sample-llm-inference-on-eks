@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-llama-8b-vllm
+  labels:
+    app: deepseek-llama-8b
+    engine: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepseek-llama-8b
+      engine: vllm
+  template:
+    metadata:
+      labels:
+        app: deepseek-llama-8b
+        engine: vllm
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /tmp/deepseek
+          type: DirectoryOrCreate
+      # vLLM needs to access the host's shared memory for tensor parallel inference.
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "2Gi"
+      containers:
+      - name: deepseek
+        image: vllm/vllm-openai:v0.24.0
+        command: [ "/bin/sh", "-c" ]
+        args: [ "vllm serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --max_model 2048" ]
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          limits:
+            cpu: "32"
+            memory: 100G
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: "16"
+            memory: 30G
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-svc-llama-8b-vllm
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: http
+  selector:
+    app: deepseek-llama-8b
+    engine: vllm
+  type: ClusterIP

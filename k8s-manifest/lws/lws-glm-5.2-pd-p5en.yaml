@@ -1,0 +1,497 @@
+# GLM-5.2-FP8 PD-disaggregation on 2x p5en.48xlarge (2x p5en.48xlarge):
+#   prefill: 1 node tp=8 (port 30000)  |  decode: 1 node tp=8 (port 30001)
+#   KV-cache transfer prefill->decode via NIXL LIBFABRIC backend over EFA RDMA
+#   router: sglang_router with --pd-disaggregation fronting both (port 8000)
+# Adapted from lws-p5en-pd-disagg-optimized.yaml (DeepSeek) with GLM-5.2 model
+# args from the tuned single-node deployment. Speculative decoding (EAGLE) is
+# deliberately OMITTED for the first PD bring-up — spec-decode + disagg is a
+# riskier combination; add back on the decode side once the path is proven.
+---
+# Prefill Cluster (single-node, tp=8)
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: lws-glm-5-2-prefill
+  # NOTE: do NOT set exclusive-topology annotation here. LWS injects a
+  # podAntiAffinity "group-key NotIn [self]" that blocks decode (different
+  # group) from sharing prefill's AZ, which we explicitly need for EFA.
+  # With size=1 the annotation serves no purpose anyway.
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 1
+    restartPolicy: None
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+          phase: prefill
+      spec: &prefill-spec
+        priorityClassName: high-priority-100
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5en.48xlarge
+        tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        containers:
+        - name: sglang-prefill-leader
+          image: &prefill-image <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.13.post1-efa
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args: &prefill-args
+            - --model-path=zai-org/GLM-5.2-FP8
+            - --host=0.0.0.0
+            - --port=30000
+            - --tp-size=8
+            # model supports 1M context; cap it to keep KV-cache budget sane
+            - --context-length=131072
+            # 0.85 proven safe for single-node tp=8 GLM (0.9 OOM'd under load)
+            - --mem-fraction-static=0.85
+            - --kv-cache-dtype=fp8_e4m3
+            - --trust-remote-code
+            # thinking / tool-call parsing (GLM-5.2 needs glm47 for tool calls)
+            - --reasoning-parser=glm45
+            - --tool-call-parser=glm47
+            - --disable-custom-all-reduce
+            - --enable-nccl-nvls
+            - --enable-p2p-check
+            - --dist-init-addr=$(LWS_LEADER_ADDRESS):5000
+            - --nnodes=$(LWS_GROUP_SIZE)
+            - --node-rank=$(LWS_WORKER_INDEX)
+            - --disaggregation-mode=prefill
+            - --disaggregation-transfer-backend=nixl
+            # HiCache: offload evicted KV to host RAM (node has ~2TB; GPU KV pool
+            # ~0.5GB/GPU at fp8). ratio=2 => host pool 2x device pool. Repeated
+            # prefixes (system prompts / multi-turn) reload over PCIe instead of
+            # recomputing prefill.
+            - --enable-hierarchical-cache
+            - --hicache-ratio=2
+            - --hicache-write-policy=write_through
+          env: &prefill-env
+            - name: LWS_WORKER_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']
+            # (v0.5.13.post1-efa image needs no NIXL env overrides: it ships only the
+            # nixl_cu13 wheel — no shadowing meson copy — with LIBFABRIC plugin bundled)
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            - name: NCCL_P2P_DISABLE
+              value: "0"
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            - name: FI_PROVIDER
+              value: "efa"
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: NCCL_NET_PLUGIN
+              value: "ofi"
+            - name: NCCL_TUNER_PLUGIN
+              value: "ofi"
+            # skip DeepGEMM JIT pre-compile (10-20 min) — PoC wants fast startup
+            - name: SGL_ENABLE_JIT_DEEPGEMM
+              value: "false"
+          ports: &prefill-ports
+            - name: http
+              containerPort: 30000
+            - name: nccl
+              containerPort: 5000
+            - name: bootstrap
+              containerPort: 8998
+          resources: &prefill-resources
+            limits:
+              vpc.amazonaws.com/efa: "16"
+              nvidia.com/gpu: "8"
+          volumeMounts: &prefill-volume-mounts
+            - name: efa-devices
+              mountPath: /dev/infiniband
+            - name: cache-volume
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+          securityContext: &prefill-security-context
+            privileged: true # required ONLY for EFA device access (/dev/infiniband); single-node manifests do not need this
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+              - SYS_ADMIN
+          startupProbe: &prefill-startup-probe
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 150
+          livenessProbe: &prefill-liveness-probe
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          readinessProbe: &prefill-readiness-probe
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+        volumes: &prefill-volumes
+          - name: efa-devices
+            hostPath:
+              path: /dev/infiniband
+              type: Directory
+          - name: cache-volume
+            hostPath:
+              path: /mnt/k8s-disks/0/models/glm
+              type: DirectoryOrCreate
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: "500Gi"
+    workerTemplate:
+      spec:
+        <<: *prefill-spec
+        containers:
+        - name: sglang-prefill-worker
+          image: *prefill-image
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args: *prefill-args
+          env: *prefill-env
+          ports: *prefill-ports
+          resources: *prefill-resources
+          volumeMounts: *prefill-volume-mounts
+          securityContext: *prefill-security-context
+          startupProbe: *prefill-startup-probe
+          livenessProbe: *prefill-liveness-probe
+          readinessProbe: *prefill-readiness-probe
+        volumes: *prefill-volumes
+---
+# Decode Cluster (single-node, tp=8)
+# NOTE: deliberately NOT using exclusive-topology — the LWS controller
+# translates that annotation into podAntiAffinity "group-key NotIn [self]",
+# which actively rejects prefill's zone. Instead, use explicit podAffinity
+# to co-locate decode in the SAME zone as prefill (required for EFA RDMA).
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: lws-glm-5-2-decode
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 1
+    restartPolicy: None
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+          phase: decode
+      spec: &decode-spec
+        priorityClassName: high-priority-100
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5en.48xlarge
+        tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        # Dynamic AZ co-location: decode follows prefill's AZ (required for EFA RDMA).
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  leaderworkerset.sigs.k8s.io/name: lws-glm-5-2-prefill
+              topologyKey: topology.kubernetes.io/zone
+        containers:
+        - name: sglang-decode-leader
+          image: &decode-image <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.13.post1-efa
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args: &decode-args
+            - --model-path=zai-org/GLM-5.2-FP8
+            - --host=0.0.0.0
+            - --port=30001
+            - --tp-size=8
+            - --context-length=131072
+            - --mem-fraction-static=0.85
+            - --kv-cache-dtype=fp8_e4m3
+            - --trust-remote-code
+            - --reasoning-parser=glm45
+            - --tool-call-parser=glm47
+            - --disable-custom-all-reduce
+            - --enable-nccl-nvls
+            - --enable-p2p-check
+            - --dist-init-addr=$(LWS_LEADER_ADDRESS):5000
+            - --nnodes=$(LWS_GROUP_SIZE)
+            - --node-rank=$(LWS_WORKER_INDEX)
+            - --disaggregation-mode=decode
+            - --disaggregation-transfer-backend=nixl
+            - --max-running-requests=128
+          env: &decode-env
+            - name: LWS_WORKER_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']
+            # (see prefill-env note: -efa image needs no NIXL env overrides)
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            - name: NCCL_P2P_DISABLE
+              value: "0"
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            - name: FI_PROVIDER
+              value: "efa"
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: NCCL_NET_PLUGIN
+              value: "ofi"
+            - name: NCCL_TUNER_PLUGIN
+              value: "ofi"
+            - name: SGL_ENABLE_JIT_DEEPGEMM
+              value: "false"
+          ports: &decode-ports
+            - name: http
+              containerPort: 30001
+            - name: nccl
+              containerPort: 5000
+          resources: &decode-resources
+            limits:
+              vpc.amazonaws.com/efa: "16"
+              nvidia.com/gpu: "8"
+          volumeMounts: &decode-volume-mounts
+            - name: efa-devices
+              mountPath: /dev/infiniband
+            - name: cache-volume
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+          securityContext: &decode-security-context
+            privileged: true # required ONLY for EFA device access (/dev/infiniband); single-node manifests do not need this
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+              - SYS_ADMIN
+          startupProbe: &decode-startup-probe
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 150
+          livenessProbe: &decode-liveness-probe
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          readinessProbe: &decode-readiness-probe
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+        volumes: &decode-volumes
+          - name: efa-devices
+            hostPath:
+              path: /dev/infiniband
+              type: Directory
+          - name: cache-volume
+            hostPath:
+              path: /mnt/k8s-disks/0/models/glm
+              type: DirectoryOrCreate
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: "500Gi"
+    workerTemplate:
+      spec:
+        <<: *decode-spec
+        containers:
+        - name: sglang-decode-worker
+          image: *decode-image
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args: *decode-args
+          env: *decode-env
+          ports: *decode-ports
+          resources: *decode-resources
+          volumeMounts: *decode-volume-mounts
+          securityContext: *decode-security-context
+          startupProbe: *decode-startup-probe
+          livenessProbe: *decode-liveness-probe
+          readinessProbe: *decode-readiness-probe
+        volumes: *decode-volumes
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: glm-5-2-prefill
+spec:
+  selector:
+    leaderworkerset.sigs.k8s.io/name: lws-glm-5-2-prefill
+    role: leader
+  ports:
+  - name: http
+    protocol: TCP
+    port: 30000
+    targetPort: http
+  - name: nccl
+    protocol: TCP
+    port: 5000
+    targetPort: nccl
+  - name: bootstrap
+    protocol: TCP
+    port: 8998
+    targetPort: bootstrap
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glm-5-2-decode
+spec:
+  selector:
+    leaderworkerset.sigs.k8s.io/name: lws-glm-5-2-decode
+    role: leader
+  ports:
+  - name: http
+    protocol: TCP
+    port: 30001
+    targetPort: http
+  - name: nccl
+    protocol: TCP
+    port: 5000
+    targetPort: nccl
+  type: ClusterIP
+---
+# Router Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glm-5-2-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: glm-5-2-router
+  template:
+    metadata:
+      labels:
+        app: glm-5-2-router
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      initContainers:
+      - name: wait-for-backends
+        image: curlimages/curl:latest
+        env:
+        - name: PREFILL_URL
+          value: "http://glm-5-2-prefill:30000"
+        - name: DECODE_URL
+          value: "http://glm-5-2-decode:30001"
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for prefill and decode backends to be healthy..."
+          echo "Prefill URL: ${PREFILL_URL}"
+          echo "Decode URL: ${DECODE_URL}"
+          MAX_WAIT=2400
+          ELAPSED=0
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            PREFILL_OK=0
+            DECODE_OK=0
+
+            if curl -f -m 5 ${PREFILL_URL}/health 2>/dev/null; then
+              echo "✓ Prefill backend is healthy"
+              PREFILL_OK=1
+            else
+              echo "✗ Prefill backend not ready yet..."
+            fi
+
+            if curl -f -m 5 ${DECODE_URL}/health 2>/dev/null; then
+              echo "✓ Decode backend is healthy"
+              DECODE_OK=1
+            else
+              echo "✗ Decode backend not ready yet..."
+            fi
+
+            if [ $PREFILL_OK -eq 1 ] && [ $DECODE_OK -eq 1 ]; then
+              echo "✓ All backends are healthy! Starting router..."
+              exit 0
+            fi
+
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+          done
+
+          echo "✗ Timeout waiting for backends after ${MAX_WAIT}s"
+          exit 1
+      containers:
+      - name: router
+        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.13.post1-efa
+        command: [ "python3", "-m", "sglang_router.launch_router" ]
+        env:
+        - name: PREFILL_URL
+          value: "http://glm-5-2-prefill:30000"
+        - name: DECODE_URL
+          value: "http://glm-5-2-decode:30001"
+        args:
+        - "--pd-disaggregation"
+        - "--prefill=$(PREFILL_URL)"
+        - "--decode=$(DECODE_URL)"
+        - "--host=0.0.0.0"
+        - "--port=8000"
+        ports:
+        - name: http
+          containerPort: 8000
+        startupProbe:
+          tcpSocket:
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 12
+        livenessProbe:
+          tcpSocket:
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 18
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glm-5-2-router
+spec:
+  selector:
+    app: glm-5-2-router
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP

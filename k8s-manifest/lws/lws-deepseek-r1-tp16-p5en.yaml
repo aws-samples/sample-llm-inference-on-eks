@@ -1,0 +1,164 @@
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: lws-deepseek-r1-sglang
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: None
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec: &common-spec
+        priorityClassName: high-priority-100
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5en.48xlarge
+        tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        containers:
+        - name: sglang-leader
+          image: &common-image docker.io/lmsysorg/sglang:v0.4.7.post1-cu124
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args:
+            # - "--model-path=deepseek-ai/DeepSeek-R1-0528"
+            &common-args
+            - "--model-path=deepseek-ai/DeepSeek-R1"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--tensor-parallel-size=16"
+            - "--quantization=fp8"
+            - "--mem-fraction-static=0.85"
+            - "--disable-custom-all-reduce"
+            - "--attention-backend=flashinfer"
+            - "--trust-remote-code"
+            - "--enable-nccl-nvls"
+            - "--enable-p2p-check"
+            # - "--enable-ep-moe"
+            - "--dist-init-addr=$(LWS_LEADER_ADDRESS):20000"
+            - "--nnodes=$(LWS_GROUP_SIZE)"
+            - "--node-rank=$(LWS_WORKER_INDEX)"
+          env: &common-env
+            - name: LWS_WORKER_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']
+            # NCCL Configuration
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            - name: NCCL_P2P_DISABLE
+              value: "0"
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            # EFA Configuration
+            - name: FI_PROVIDER
+              value: "efa"
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: NCCL_NET_PLUGIN
+              value: "aws-ofi"
+            - name: NCCL_TUNER_PLUGIN
+              value: "aws-ofi"
+            - name: LD_LIBRARY_PATH
+              value: "/opt/amazon/aws-ofi-nccl/lib:/opt/amazon/efa/lib:/usr/local/cuda/lib64:/usr/local/lib"
+            # - name: SGL_ENABLE_JIT_DEEPGEMM
+            - name: SGLANG_ENABLE_JIT_DEEPGEMM
+              value: "0"
+          ports: &common-ports
+            - name: http
+              containerPort: 8000
+            - name: nccl
+              containerPort: 20000
+          resources: &common-resources
+            limits:
+              vpc.amazonaws.com/efa: "16"
+              nvidia.com/gpu: "8"
+          startupProbe: &startup-probe
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe: &readiness-probe
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          livenessProbe: &liveness-probe
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 600
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          volumeMounts: &common-volume-mounts
+            - name: efa-devices
+              mountPath: /dev/infiniband
+            - mountPath: /root/.cache/huggingface
+              name: cache-volume
+            - name: shm
+              mountPath: /dev/shm
+          securityContext: &common-security-context
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+        volumes: &common-volumes
+          - name: efa-devices
+            hostPath:
+              path: /dev/infiniband
+              type: Directory
+          - name: cache-volume
+            hostPath:
+              path: /mnt/k8s-disks/0/models/deepseek
+              type: DirectoryOrCreate
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: "500Gi"
+    workerTemplate:
+      spec:
+        <<: *common-spec
+        containers:
+        - name: sglang-worker
+          image: *common-image
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args: *common-args
+          env: *common-env
+          ports: *common-ports
+          resources: *common-resources
+          startupProbe: *startup-probe
+          readinessProbe: *readiness-probe
+          livenessProbe: *liveness-probe
+          volumeMounts: *common-volume-mounts
+          securityContext: *common-security-context
+        volumes: *common-volumes
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-r1-leader
+spec:
+  selector:
+    leaderworkerset.sigs.k8s.io/name: lws-deepseek-r1-sglang
+    role: leader
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: http
+  - name: nccl
+    protocol: TCP
+    port: 20000
+    targetPort: nccl
+  type: ClusterIP

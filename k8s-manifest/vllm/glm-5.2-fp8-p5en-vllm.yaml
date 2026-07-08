@@ -1,0 +1,131 @@
+# GLM-5.2-FP8 on vLLM, single p5en.48xlarge (8x H200) — engine A/B counterpart to
+# ../sglang/glm-5.2-fp8-p5en.yaml. Args follow the official vLLM recipe for 8xH200
+# (https://recipes.vllm.ai/zai-org/GLM-5.2) with the same tuning choices as the
+# sglang deployment (fp8 KV cache, 128K context cap).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glm-5-2-vllm
+  labels:
+    app: glm-5-2-vllm
+    engine: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: glm-5-2-vllm
+      engine: vllm
+  template:
+    metadata:
+      labels:
+        app: glm-5-2-vllm
+        model: glm-5-2
+        engine: vllm
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p5en.48xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: glm
+        image: vllm/vllm-openai:v0.24.0 # GLM-5.2 needs vLLM >= 0.23
+        imagePullPolicy: IfNotPresent
+        command: [ "vllm", "serve" ]
+        args:
+        - zai-org/GLM-5.2-FP8
+        - --host=0.0.0.0
+        - --port=8000
+        - --tensor-parallel-size=8
+        # model supports 1M context; cap it to keep KV-cache budget sane (same as sglang)
+        - --max-model-len=131072
+        # FP8 KV cache — per the official recipe; matches sglang's fp8_e4m3
+        - --kv-cache-dtype=fp8
+        # vLLM default 0.9 OOM-crashed sglang's equivalent under load; stay at 0.85
+        - --gpu-memory-utilization=0.85
+        # KV offload to host RAM — vLLM's HiCache equivalent. 400GiB total across
+        # TP ranks (~50GiB/rank), comparable to sglang hicache-ratio=2
+        - --kv-offloading-size=400
+        - --kv-offloading-backend=native
+        # MTP speculative decoding, per recipe (sglang uses EAGLE over the same MTP head)
+        - --speculative-config={"method":"mtp","num_speculative_tokens":5}
+        # thinking / tool-call parsing (same parsers as sglang)
+        - --reasoning-parser=glm45
+        - --tool-call-parser=glm47
+        - --enable-auto-tool-choice
+        - --trust-remote-code
+        - --served-model-name=zai-org/GLM-5.2-FP8
+        env:
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_P2P_DISABLE
+          value: "0"
+        - name: NCCL_P2P_LEVEL
+          value: "NVL"
+        - name: NCCL_NVLS_ENABLE
+          value: "1"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "100"
+            memory: 1124Gi
+            ephemeral-storage: 800Gi
+            nvidia.com/gpu: "8"
+        # first start downloads ~756GB of weights — allow up to 90 min
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 180
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 60
+          timeoutSeconds: 30
+          failureThreshold: 5
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      # same hostPath as the sglang deployment — weights are shared if it lands on
+      # a node that already pulled them (fresh CB node 2 will download once)
+      - name: cache-volume
+        hostPath:
+          path: /mnt/k8s-disks/0/models/glm
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "500Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glm-5-2-vllm
+spec:
+  selector:
+    app: glm-5-2-vllm
+    engine: vllm
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP

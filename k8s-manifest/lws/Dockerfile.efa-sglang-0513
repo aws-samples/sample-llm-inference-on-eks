@@ -1,0 +1,61 @@
+# SGLang v0.5.13.post1 (GLM-5.2 capable) + EFA userspace + aws-ofi-nccl.
+#
+# Lesson from Dockerfile.efa-nixl-sglang-0513 (deprecated): the sglang base image
+# already ships NIXL as the pip wheel `nixl_cu13` with ALL backend plugins
+# prebuilt — including LIBFABRIC (EFA). Building NIXL+UCX from source added a
+# second, ABI-incompatible libnixl that shadowed the wheel via LD_LIBRARY_PATH
+# and crashed sglang's disaggregation scheduler with an ImportError
+# (undefined symbol in nixl_cu13/_bindings). So: do NOT install NIXL here.
+#
+# What IS still required for EFA:
+#   - EFA userspace libs (libfabric-aws, rdma-core): the wheel's LIBFABRIC
+#     plugin links against libfabric at runtime
+#   - aws-ofi-nccl (libnccl-ofi): lets NCCL allreduce run over EFA (independent
+#     of NIXL, needed for cross-node TP)
+#
+# Build (Apple Silicon -> amd64):
+#   docker buildx build --platform linux/amd64 -f Dockerfile.efa-sglang-0513 \
+#     -t <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.13.post1-efa --push .
+
+FROM docker.io/lmsysorg/sglang:v0.5.13.post1
+
+ARG EFA_INSTALLER_VERSION=1.49.0
+
+# Minimal deps for the EFA installer debs
+RUN apt-get update && \
+    apt-get install -y \
+        curl \
+        pciutils \
+        libhwloc-dev \
+        libnuma-dev \
+        environment-modules \
+        tcl \
+        pci.ids && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install EFA userspace libraries (includes libfabric, rdma-core, libibverbs, aws-ofi-nccl)
+# Use apt (not dpkg) on the bundled .debs so deps like ibverbs-providers upgrade cleanly
+RUN cd /tmp \
+    && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && tar -xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && cd aws-efa-installer/DEBS/UBUNTU2404/x86_64 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ./rdma-core/ibverbs-providers_*.deb \
+        ./rdma-core/libibverbs1_*.deb \
+        ./rdma-core/libibverbs-dev_*.deb \
+        ./rdma-core/librdmacm1_*.deb \
+        ./rdma-core/librdmacm-dev_*.deb \
+        ./rdma-core/rdma-core_*.deb \
+        ./rdma-core/ibverbs-utils_*.deb \
+        ./libfabric1-aws_*.deb \
+        ./libnccl-ofi_*.deb \
+    && rm -rf /var/lib/apt/lists/* /tmp/aws-efa-installer*
+
+# Create symlink for pod's expected path
+RUN ln -sf /opt/amazon/ofi-nccl /opt/amazon/aws-ofi-nccl
+
+# EFA/OFI paths only — deliberately NO /usr/local/nixl or /opt/ucx (see header).
+# The nixl wheel's bundled plugins are discovered automatically; no NIXL_PLUGIN_DIR needed.
+ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/aws-ofi-nccl/lib:$LD_LIBRARY_PATH
+ENV PATH=/opt/amazon/efa/bin:$PATH

@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-llama-70b-sglang
+  labels:
+    app: deepseek-llama-70b
+    engine: sglang
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepseek-llama-70b-sglang
+      engine: sglang
+  template:
+    metadata:
+      labels:
+        app: deepseek-llama-70b-sglang
+        model: deepseek-r1-distill-llama-70b
+        engine: sglang
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: g6e.12xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: deepseek
+        image: docker.io/lmsysorg/sglang:v0.5.13.post1
+        imagePullPolicy: Always # IfNotPresent or Never
+        command: [ "python3", "-m", "sglang.launch_server" ]
+        args:
+        - "--model-path=deepseek-ai/DeepSeek-R1-Distill-Llama-70B"
+        - "--host=0.0.0.0"
+        - "--port=8000"
+        - "--context-length=32768"
+        - "--tensor-parallel-size=4"
+        - "--mem-fraction-static=0.9"
+        - "--disable-custom-all-reduce"
+        - "--trust-remote-code"
+        env:
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_IB_DISABLE
+          value: "1"
+        - name: NCCL_P2P_DISABLE
+          value: "1"
+        - name: NCCL_SHM_DISABLE
+          value: "0"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "32"
+            memory: 300G
+            nvidia.com/gpu: "4"
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /tmp/deepseek
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "8Gi"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-svc-llama-70b-sglang
+spec:
+  selector:
+    app: deepseek-llama-70b-sglang
+    engine: sglang
+  ports:
+  - protocol: TCP
+    port: 80 # port on host
+    targetPort: http # port in container
+  type: ClusterIP

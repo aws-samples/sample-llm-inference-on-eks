@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glm-5-2
+  labels:
+    app: glm-5-2
+    engine: sglang
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: glm-5-2
+      engine: sglang
+  template:
+    metadata:
+      labels:
+        app: glm-5-2
+        model: glm-5-2
+        engine: sglang
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p5en.48xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: glm
+        image: docker.io/lmsysorg/sglang:v0.5.13.post1 # GLM-5.2 requires SGLang >= v0.5.13.post1
+        imagePullPolicy: IfNotPresent
+        command: [ "python3", "-m", "sglang.launch_server" ]
+        args:
+        - --model-path=zai-org/GLM-5.2-FP8
+        - --host=0.0.0.0
+        - --port=8000
+        - --tensor-parallel-size=8
+        # model supports 1M context; cap it to keep KV-cache budget sane
+        - --context-length=131072
+        # 0.85 + 32K chunked prefill OOM-crashed under 20-concurrency 8K-input load
+        # (large-chunk prefill activations spiked ~3GiB/GPU with only ~2GiB free).
+        # 0.80 frees ~7GiB/GPU of activation headroom to cover those spikes.
+        - --mem-fraction-static=0.80
+        # FP8 KV cache ~halves KV bytes/token -> ~2x KV pool -> more concurrent prefill
+        - --kv-cache-dtype=fp8_e4m3
+        # HiCache: spill evicted KV to host RAM (~2TB on p5en); repeated prefixes
+        # reload over PCIe instead of re-running prefill
+        - --enable-hierarchical-cache
+        - --hicache-ratio=2
+        - --hicache-write-policy=write_through
+        # default 2048 leaves 8K-input workloads prefill-bound (TTFT dominated by
+        # queueing); 32768 measured +34~78% throughput, -39~59% TTFT on 8xH200
+        - --chunked-prefill-size=32768
+        # default max-prefill-tokens (16384) silently caps the effective chunk
+        # at 16K; must be raised together with chunked-prefill-size
+        - --max-prefill-tokens=32768
+        # match KV capacity: ~60-90 concurrent 8K+1K FP8 requests fit on one node
+        - --max-running-requests=80
+        - --trust-remote-code
+        # MTP speculative decoding (EAGLE) — balanced 1-1-2 profile: at high
+        # concurrency the low-latency 5-1-6 profile wastes verification compute
+        # on rejected draft tokens and steals decode capacity
+        - --speculative-algorithm=EAGLE
+        - --speculative-num-steps=1
+        - --speculative-eagle-topk=1
+        - --speculative-num-draft-tokens=2
+        # thinking / tool-call parsing (GLM-5.2 needs glm47 for tool calls)
+        - --reasoning-parser=glm45
+        - --tool-call-parser=glm47
+        env:
+        # NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True here —
+        # VMM-backed allocations can't be IPC-registered by custom all-reduce and
+        # CUDA graph capture fails at startup ("invalid argument")
+        - name: SGL_ENABLE_JIT_DEEPGEMM
+          value: "false"
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_P2P_DISABLE
+          value: "0"
+        - name: NCCL_P2P_LEVEL
+          value: "NVL"
+        - name: NCCL_NVLS_ENABLE
+          value: "1"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "100"
+            memory: 1124Gi
+            ephemeral-storage: 800Gi
+            nvidia.com/gpu: "8"
+        # first start downloads ~756GB of weights — allow up to 90 min
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 180
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 60
+          timeoutSeconds: 30
+          failureThreshold: 5
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /mnt/k8s-disks/0/models/glm
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "500Gi"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: glm-5-2
+spec:
+  selector:
+    app: glm-5-2
+    engine: sglang
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLM-5.2-FP8 on p5en — Benchmark Report</title>
+<style>
+  :root {
+    --surface-1: #fcfcfb; --surface-2: #f4f4f2;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #8a8983;
+    --series-1: #2a78d6; --series-2: #1baf7a; --series-3: #eda100;
+    --grid: #e6e5e1; --border: #dddcd7;
+    --good-bg: #e7f5ec; --good-fg: #0f6a33;
+    --bad-bg: #fdecec; --bad-fg: #a3282a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface-1: #1a1a19; --surface-2: #232322;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8a8983;
+      --series-1: #3987e5; --series-2: #199e70; --series-3: #c98500;
+      --grid: #33332f; --border: #3d3c38;
+      --good-bg: #12331e; --good-fg: #6fd396;
+      --bad-bg: #3a1717; --bad-fg: #ef9a9a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface-1); color: var(--text-primary);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 48px 0 4px; }
+  .sub { color: var(--text-secondary); font-size: 13.5px; margin: 0 0 8px; }
+  .chart-note { color: var(--text-muted); font-size: 12.5px; margin: 2px 0 10px; }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 20px 10px; margin-top: 14px;
+  }
+  svg text { font: 12px -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--text-secondary); }
+  svg .val { fill: var(--text-primary); font-weight: 600; }
+  svg .cat { fill: var(--text-primary); }
+  svg .gridline { stroke: var(--grid); stroke-width: 1; }
+  .bar { rx: 4; }
+  .bar:hover { filter: brightness(1.12); cursor: default; }
+  .tip {
+    position: fixed; pointer-events: none; z-index: 10; display: none;
+    background: var(--text-primary); color: var(--surface-1);
+    padding: 6px 10px; border-radius: 6px; font-size: 12.5px; max-width: 320px;
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin: 10px 0 6px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-secondary); font-weight: 600; font-size: 12.5px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+  .pill.good { background: var(--good-bg); color: var(--good-fg); }
+  .pill.bad  { background: var(--bad-bg);  color: var(--bad-fg); }
+  .legend { display: flex; gap: 18px; font-size: 12.5px; color: var(--text-secondary); margin: 4px 0 2px; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .meta { color: var(--text-muted); font-size: 12.5px; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GLM-5.2-FP8 on EKS p5en.48xlarge — Benchmark Report</h1>
+  <p class="sub">2026-07-07/08 · zai-org/GLM-5.2-FP8 (753B MoE, FP8) · 8–16× H200 · Karpenter capacity-block nodes ·
+     genai-perf / sglang.bench_serving · fp8 KV throughout (except where noted)</p>
+
+  <!-- ============ 1. Throughput by deployment shape ============ -->
+  <h2>1 · Total throughput by deployment shape</h2>
+  <p class="sub">8K-in / 1K-out, thinking off. Higher is better.</p>
+  <div class="card">
+    <div id="c1"></div>
+    <p class="chart-note">2-node TP16 at concurrency 40 wins on raw throughput (730 tok/s) but uses two nodes —
+       per-node it is 365 tok/s vs 456 tok/s for a single-node TP8. PD (1P+1D) trails on this prefill-heavy profile.</p>
+  </div>
+
+  <!-- ============ 2. TTFT ============ -->
+  <h2>2 · Time-to-first-token (p50) by shape</h2>
+  <p class="sub">Same runs. Lower is better.</p>
+  <div class="card">
+    <div id="c2"></div>
+    <p class="chart-note">TP16 c40 delivers both the best TTFT (1.2s) and the best throughput — deep batching across
+       16 GPUs. PD suffers on TTFT here because prefill hand-off adds queueing at high concurrency.</p>
+  </div>
+
+  <!-- ============ 3. KV offload A/B ============ -->
+  <h2>3 · KV-cache offload to host RAM — engine A/B (single node)</h2>
+  <p class="sub">Long-document reuse: 8 users × ~30K-token docs, concurrency 8, re-asked after GPU-pool eviction.
+     Cold = full prefill; Hot = reload from host RAM. Lower is better.</p>
+  <div class="card">
+    <div class="legend">
+      <span><span class="sw" style="background:var(--series-1)"></span>Cold TTFT (full prefill)</span>
+      <span><span class="sw" style="background:var(--series-2)"></span>Hot TTFT (host-RAM reload)</span>
+    </div>
+    <div id="c3"></div>
+    <p class="chart-note">Same hardware, same fp8 KV, same workload — only the offload implementation differs.
+       SGLang HiCache reloads the full 240K-token working set from host RAM
+       (<span class="pill good">8.1× faster TTFT</span>, log-verified 100% cache hit); vLLM's native
+       OffloadingConnector barely hits (<span class="pill bad">2.5% hit rate</span>). vLLM's documented
+       remedy is the <code>lmcache</code> offload backend (untested — round B).</p>
+  </div>
+
+  <!-- ============ 4. Offload on PD vs single node ============ -->
+  <h2>4 · Why offload pays off on single-node but not on PD</h2>
+  <p class="sub">SGLang HiCache, hot-vs-cold speedup of the same experiment run against two deployment shapes.</p>
+  <div class="card">
+    <div id="c4"></div>
+    <p class="chart-note">On PD every request still pays the prefill→decode KV transfer + handshake, which dominates
+       once prefill compute is removed — offload gains vanish (~1.0×). On a single node there is no transfer floor,
+       so the full prefill saving lands (10.4× wall-clock on this working set).
+       Capacity rule: benefit is binary — working set must fit the host pool, or LRU eviction zeroes it.</p>
+  </div>
+
+  <!-- ============ Data table ============ -->
+  <h2>Appendix · All runs</h2>
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th>Run</th><th>Shape</th><th>Config</th><th class="num">Conc.</th>
+        <th class="num">TTFT p50 (ms)</th><th class="num">ITL avg (ms)</th><th class="num">Total tok/s</th><th>Stable</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>R1</td><td>1-node TP8 SGLang</td><td>chunk 2048, mem 0.85, MTP 5-1-6</td><td class="num">20</td><td class="num">2,040</td><td class="num">27.9</td><td class="num">476</td><td>✅</td></tr>
+        <tr><td>R4</td><td>1-node TP8 SGLang</td><td>chunk 32K, mem 0.80, MTP 1-1-2</td><td class="num">20</td><td class="num">3,202</td><td class="num">27.5</td><td class="num">456</td><td>✅</td></tr>
+        <tr><td>V1</td><td>1-node TP8 vLLM 0.24</td><td>defaults, mem 0.85, MTP 5</td><td class="num">20</td><td class="num">1,953</td><td class="num">28.7</td><td class="num">454</td><td>✅</td></tr>
+        <tr><td>L2</td><td>2-node TP16 LWS+EFA</td><td>mem 0.80, MTP 1-1-2</td><td class="num">20</td><td class="num">2,458</td><td class="num">32.4</td><td class="num">396</td><td>✅</td></tr>
+        <tr><td>L3</td><td>2-node TP16 LWS+EFA</td><td>(same)</td><td class="num">40</td><td class="num">1,230</td><td class="num">41.1</td><td class="num">730</td><td>✅</td></tr>
+        <tr><td>P1</td><td>2-node PD 1P+1D NIXL</td><td>both TP8, mem 0.85</td><td class="num">20</td><td class="num">11,560</td><td class="num">25.0</td><td class="num">356</td><td>✅</td></tr>
+        <tr><td>P2</td><td>2-node PD 1P+1D NIXL</td><td>(bench_serving)</td><td class="num">40</td><td class="num">17,246</td><td class="num">31.7</td><td class="num">712</td><td>✅</td></tr>
+      </tbody>
+    </table>
+    <details>
+      <summary>KV offload experiment details (2026-07-08)</summary>
+      <table>
+        <thead><tr><th>Engine</th><th>Offload</th><th class="num">Cold TTFT avg</th><th class="num">Hot TTFT avg</th><th class="num">Speedup</th><th>Hit evidence</th></tr></thead>
+        <tbody>
+          <tr><td>SGLang v0.5.13</td><td>HiCache ratio=2 (~330GB host)</td><td class="num">17.9 s</td><td class="num">2.2 s</td><td class="num">8.1×</td><td>#cached-token: 245K (100%)</td></tr>
+          <tr><td>vLLM v0.24</td><td>native, 400 GiB</td><td class="num">17.6 s</td><td class="num">14.8 s</td><td class="num">1.14×</td><td>prefix hit rate 2.5%</td></tr>
+          <tr><td>SGLang (PD prefill side)</td><td>HiCache ratio=2</td><td class="num">21.5 s (c20)</td><td class="num">21.1 s</td><td class="num">~1.0×</td><td>100% hit, gain absorbed by P→D transfer</td></tr>
+        </tbody>
+      </table>
+      <p class="meta">All offload runs: max_tokens=1 isolates prefill; flood sized to evict GPU pool while the
+      working set stays inside the host pool. See GLM-5.2-BENCHMARK.md for methodology and crash post-mortems.</p>
+    </details>
+  </div>
+
+  <p class="meta" style="margin-top:28px">Source of truth: <code>docs/GLM-5.2-BENCHMARK.md</code>.
+     This HTML is a presentation snapshot generated 2026-07-08.</p>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const tip = document.getElementById('tip');
+function showTip(e, html){ tip.innerHTML = html; tip.style.display='block';
+  tip.style.left = Math.min(e.clientX+14, innerWidth-330)+'px'; tip.style.top = (e.clientY+14)+'px'; }
+function hideTip(){ tip.style.display='none'; }
+
+// Horizontal bar chart: rows=[{label, value, note, color?}], fmt(value)->string
+function hbar(el, rows, opts){
+  const {maxV=Math.max(...rows.map(r=>r.value)), fmt=v=>v, color=css('--series-1'),
+         W=920, rowH=34, labW=250, unit=''} = opts||{};
+  const H = rows.length*rowH + 30;
+  const plotW = W - labW - 90;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  // gridlines at 25/50/75/100%
+  for(const f of [0.25,0.5,0.75,1]){
+    const x = labW + plotW*f;
+    s += `<line class="gridline" x1="${x}" y1="6" x2="${x}" y2="${H-24}"/>`;
+    s += `<text x="${x}" y="${H-8}" text-anchor="middle">${fmt(maxV*f)}</text>`;
+  }
+  rows.forEach((r,i)=>{
+    const y = i*rowH + 8, bh = rowH-14;
+    const w = Math.max(2, plotW * r.value/maxV);
+    const c = r.color || color;
+    s += `<text class="cat" x="${labW-10}" y="${y+bh/2+4}" text-anchor="end">${r.label}</text>`;
+    s += `<rect class="bar" x="${labW}" y="${y}" width="${w}" height="${bh}" fill="${c}"
+            data-tip="${r.label}: <b>${fmt(r.value)}${unit}</b>${r.note?' — '+r.note:''}"/>`;
+    s += `<text class="val" x="${labW+w+8}" y="${y+bh/2+4}">${fmt(r.value)}${unit}</text>`;
+  });
+  s += `</svg>`;
+  el.innerHTML = s;
+  el.querySelectorAll('.bar').forEach(b=>{
+    b.addEventListener('mousemove', e=>showTip(e, b.dataset.tip));
+    b.addEventListener('mouseleave', hideTip);
+  });
+}
+
+// Grouped 2-series horizontal bars: rows=[{label, a, b, noteA, noteB}]
+function hbar2(el, rows, opts){
+  const {maxV, fmtV=v=>v, W=920, groupH=64, labW=250, unit=''} = opts;
+  const cA = css('--series-1'), cB = css('--series-2');
+  const H = rows.length*groupH + 30, plotW = W - labW - 110, bh = 20;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  for(const f of [0.25,0.5,0.75,1]){
+    const x = labW + plotW*f;
+    s += `<line class="gridline" x1="${x}" y1="6" x2="${x}" y2="${H-24}"/>`;
+    s += `<text x="${x}" y="${H-8}" text-anchor="middle">${fmtV(maxV*f)}</text>`;
+  }
+  rows.forEach((r,i)=>{
+    const y = i*groupH + 10;
+    s += `<text class="cat" x="${labW-10}" y="${y+bh+2}" text-anchor="end">${r.label}</text>`;
+    const wA = Math.max(2, plotW*r.a/maxV), wB = Math.max(2, plotW*r.b/maxV);
+    s += `<rect class="bar" x="${labW}" y="${y}" width="${wA}" height="${bh}" fill="${cA}"
+           data-tip="${r.label} — cold: <b>${fmtV(r.a)}${unit}</b>${r.noteA?' · '+r.noteA:''}"/>`;
+    s += `<text class="val" x="${labW+wA+8}" y="${y+bh-5}">${fmtV(r.a)}${unit}</text>`;
+    s += `<rect class="bar" x="${labW}" y="${y+bh+2}" width="${wB}" height="${bh}" fill="${cB}"
+           data-tip="${r.label} — hot: <b>${fmtV(r.b)}${unit}</b>${r.noteB?' · '+r.noteB:''}"/>`;
+    s += `<text class="val" x="${labW+wB+8}" y="${y+2*bh-3}">${fmtV(r.b)}${unit} ${r.badge||''}</text>`;
+  });
+  s += `</svg>`;
+  el.innerHTML = s;
+  el.querySelectorAll('.bar').forEach(b=>{
+    b.addEventListener('mousemove', e=>showTip(e, b.dataset.tip));
+    b.addEventListener('mouseleave', hideTip);
+  });
+}
+
+// 1 · throughput
+hbar(document.getElementById('c1'), [
+  {label:'2-node TP16 · c40 (L3)', value:730, note:'best raw throughput; 365 tok/s per node'},
+  {label:'2-node PD 1P+1D · c40 (P2)', value:712, note:'bench_serving; TTFT cost is heavy'},
+  {label:'1-node TP8 SGLang · c20 (R1)', value:476, note:'best per-node efficiency'},
+  {label:'1-node TP8 SGLang · c20 (R4)', value:456, note:'32K chunk, mem 0.80'},
+  {label:'1-node TP8 vLLM · c20 (V1)', value:454, note:'engine parity with SGLang'},
+  {label:'2-node TP16 · c20 (L2)', value:396, note:'under-batched for 16 GPUs'},
+  {label:'2-node PD 1P+1D · c20 (P1)', value:356, note:'prefill-heavy profile suits PD poorly'},
+], {fmt:v=>Math.round(v), unit:' tok/s'});
+
+// 2 · TTFT p50
+hbar(document.getElementById('c2'), [
+  {label:'2-node TP16 · c40 (L3)', value:1230},
+  {label:'1-node TP8 vLLM · c20 (V1)', value:1953},
+  {label:'1-node TP8 SGLang · c20 (R1)', value:2040},
+  {label:'2-node TP16 · c20 (L2)', value:2458},
+  {label:'1-node TP8 SGLang · c20 (R4)', value:3202},
+  {label:'2-node PD · c20 (P1)', value:11560},
+  {label:'2-node PD · c40 (P2)', value:17246},
+], {fmt:v=>(v/1000).toFixed(1)+'s', unit:''});
+
+// 3 · offload A/B (cold vs hot)
+hbar2(document.getElementById('c3'), [
+  {label:'SGLang + HiCache', a:17.9, b:2.2, badge:'← 8.1×', noteA:'full prefill 8×30K docs', noteB:'100% host-cache hit (log-verified)'},
+  {label:'vLLM + native offload', a:17.6, b:14.8, badge:'1.14×', noteA:'full prefill', noteB:'prefix hit rate only 2.5%'},
+], {maxV:20, fmtV:v=>v.toFixed(1), unit:'s'});
+
+// 4 · shape sensitivity of offload benefit
+hbar(document.getElementById('c4'), [
+  {label:'Single-node TP8 (no transfer floor)', value:10.4, note:'wall-clock speedup, 8×30K working set', color:css('--series-2')},
+  {label:'PD 1P+1D (P→D transfer dominates)', value:1.0, note:'100% cache hit but no end-to-end gain', color:css('--series-3')},
+], {maxV:12, fmt:v=>v.toFixed(1), unit:'×'});
+</script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+# https://raw.githubusercontent.com/awslabs/data-on-eks/refs/heads/main/gen-ai/inference/vllm-ray-gpu-deepseek/open-webui.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  labels:
+    app: open-webui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      containers:
+      - name: open-webui
+        image: ghcr.io/open-webui/open-webui:main
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "500Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        env:
+        # CHANGE ME: point at your model's k8s Service (any OpenAI-compatible
+        # endpoint from this repo). This Deployment runs in the `deepseek`
+        # namespace, so use the FQDN for Services in other namespaces, e.g.:
+        #   http://glm-5-2.default.svc.cluster.local/v1
+        # Multiple backends can be semicolon-separated.
+        - name: OPENAI_API_BASE_URLS
+          value: "http://glm-5-2.default.svc.cluster.local/v1"
+        - name: OPENAI_API_KEY
+          value: "dummy" # Replace with actual API key if required
+        volumeMounts:
+        - name: webui-volume
+          mountPath: /app/backend/data
+      volumes:
+      - name: webui-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  labels:
+    app: open-webui
+spec:
+  type: ClusterIP
+  selector:
+    app: open-webui
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080

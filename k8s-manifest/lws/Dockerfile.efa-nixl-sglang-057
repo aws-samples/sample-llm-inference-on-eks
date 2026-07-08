@@ -1,0 +1,73 @@
+FROM docker.io/lmsysorg/sglang:v0.5.7
+
+ARG EFA_INSTALLER_VERSION=latest
+ARG AWS_OFI_NCCL_VERSION=aws
+ARG UCX_VERSION=1.17.0
+
+# Install dependencies
+RUN apt-get update && \
+    apt-get install -y \
+        build-essential \
+        git \
+        autoconf \
+        automake \
+        libtool \
+        pkg-config \
+        wget \
+        curl \
+        pciutils \
+        libhwloc-dev \
+        libnuma-dev \
+        rdma-core \
+        libibverbs-dev \
+        environment-modules \
+        tcl \
+        tcl-dev \
+        pci.ids && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install EFA userspace libraries (includes libfabric)
+RUN cd /tmp \
+    && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && tar -xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && cd aws-efa-installer \
+    && ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify \
+    && rm -rf /tmp/aws-efa-installer*
+
+# Build and install UCX with EFA/verbs support
+RUN cd /tmp \
+    && wget https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz \
+    && tar xzf ucx-${UCX_VERSION}.tar.gz \
+    && cd ucx-${UCX_VERSION} \
+    && ./configure --prefix=/opt/ucx \
+        --with-verbs \
+        --with-rdmacm \
+        --with-cuda=/usr/local/cuda \
+        --enable-optimizations \
+        --enable-mt \
+        --disable-logging \
+        --disable-debug \
+        --disable-assertions \
+        --disable-params-check \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/ucx-${UCX_VERSION}*
+
+# Install NIXL with the UCX we just built
+RUN export UCX_DIR=/opt/ucx \
+    && export LD_LIBRARY_PATH=/opt/ucx/lib:$LD_LIBRARY_PATH \
+    && export PKG_CONFIG_PATH=/opt/ucx/lib/pkgconfig:$PKG_CONFIG_PATH \
+    && pip install nixl[cu12]
+
+# Patch NIXL to use LIBFABRIC backend by default instead of UCX
+RUN sed -i 's/backends: list\[str\] = \["UCX"\]/backends: list[str] = ["LIBFABRIC"]/' \
+    /usr/local/lib/python3.12/dist-packages/nixl_cu12/_api.py
+
+# Create symlink for pod's expected path
+RUN ln -sf /opt/amazon/ofi-nccl /opt/amazon/aws-ofi-nccl
+
+# Set environment variables
+ENV LD_LIBRARY_PATH=/opt/ucx/lib:/opt/amazon/efa/lib:/opt/amazon/aws-ofi-nccl/lib:$LD_LIBRARY_PATH
+ENV PATH=/opt/ucx/bin:/opt/amazon/efa/bin:$PATH
+ENV PKG_CONFIG_PATH=/opt/ucx/lib/pkgconfig:$PKG_CONFIG_PATH

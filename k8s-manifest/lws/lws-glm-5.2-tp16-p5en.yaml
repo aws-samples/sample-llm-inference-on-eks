@@ -1,0 +1,186 @@
+# GLM-5.2-FP8 on 2x p5en.48xlarge (16x H200), TP=16 across nodes via EFA.
+# Sized for 2x p5en.48xlarge (e.g. reserved via EC2 Capacity Blocks / ODCR);
+# the reserved-capacity-pool provisions both nodes from it.
+#
+# IMAGE PREREQUISITE: GLM-5.2 requires SGLang >= v0.5.13.post1, but the existing
+# EFA images (sglang-efa-p5:v0.5.7/v0.5.10) are too old. Rebuild the EFA image
+# from v0.5.13.post1 before deploying. Fallback: docker.io/lmsysorg/sglang:v0.5.13.post1
+# works WITHOUT the aws-ofi-nccl plugin — NCCL falls back to TCP over eth0 (slow
+# cross-node allreduce; fine for a functional test, not for benchmarking).
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: lws-glm-5-2-sglang
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: None
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec: &common-spec
+        priorityClassName: high-priority-100
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5en.48xlarge
+        tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        containers:
+        - name: sglang-leader
+          image: &common-image <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.13.post1-nixl # EFA 1.49 + aws-ofi-nccl + NIXL 0.10.1 (LIBFABRIC backend)
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args: &common-args
+            - --model-path=zai-org/GLM-5.2-FP8
+            - --host=0.0.0.0
+            - --port=8000
+            - --tensor-parallel-size=16
+            # model supports 1M context; cap it to keep KV-cache budget sane
+            - --context-length=131072
+            # 0.85 OOM-crashed under 20-concurrency 8K-input load (same failure
+            # signature as single-node: static pool is % of total VRAM, so TP16's
+            # weight savings all went to KV pool, leaving <1GiB activation headroom).
+            # 0.80 frees ~7GiB/GPU for activations; KV pool is still ~3x single-node.
+            - --mem-fraction-static=0.80
+            # FP8 KV cache ~halves KV bytes/token -> ~2x KV pool
+            - --kv-cache-dtype=fp8_e4m3
+            - --trust-remote-code
+            # MTP speculative decoding (EAGLE) — balanced 1-1-2 profile: at high
+            # concurrency 5-1-6 wastes verification compute on rejected drafts
+            - --speculative-algorithm=EAGLE
+            - --speculative-num-steps=1
+            - --speculative-eagle-topk=1
+            - --speculative-num-draft-tokens=2
+            # thinking / tool-call parsing (GLM-5.2 needs glm47 for tool calls)
+            - --reasoning-parser=glm45
+            - --tool-call-parser=glm47
+            # multi-node settings (same as lws-deepseek-v3.2-tp16-p5.yaml)
+            - --disable-custom-all-reduce
+            - --enable-nccl-nvls
+            - --enable-p2p-check
+            - --dist-init-addr=$(LWS_LEADER_ADDRESS):20000
+            - --nnodes=$(LWS_GROUP_SIZE)
+            - --node-rank=$(LWS_WORKER_INDEX)
+          env: &common-env
+            - name: LWS_WORKER_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']
+            # NCCL Configuration
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            - name: NCCL_P2P_DISABLE
+              value: "0"
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            # EFA Configuration
+            - name: FI_PROVIDER
+              value: "efa"
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: NCCL_NET_PLUGIN
+              value: "ofi"
+            - name: NCCL_TUNER_PLUGIN
+              value: "ofi"
+            # skip DeepGEMM JIT pre-compile (10-20 min) — PoC wants fast startup
+            - name: SGL_ENABLE_JIT_DEEPGEMM
+              value: "false"
+          ports: &common-ports
+            - name: http
+              containerPort: 8000
+            - name: nccl
+              containerPort: 20000
+          resources: &common-resources
+            limits:
+              vpc.amazonaws.com/efa: "16"
+              nvidia.com/gpu: "8"
+          startupProbe: &startup-probe
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe: &readiness-probe
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          livenessProbe: &liveness-probe
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 600
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          volumeMounts: &common-volume-mounts
+            - name: efa-devices
+              mountPath: /dev/infiniband
+            - name: cache-volume
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+          securityContext: &common-security-context
+            privileged: true # required ONLY for EFA device access (/dev/infiniband); single-node manifests do not need this
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+              - SYS_ADMIN
+        volumes: &common-volumes
+          - name: efa-devices
+            hostPath:
+              path: /dev/infiniband
+              type: Directory
+          - name: cache-volume
+            hostPath:
+              path: /mnt/k8s-disks/0/models/glm
+              type: DirectoryOrCreate
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: "500Gi"
+    workerTemplate:
+      spec:
+        <<: *common-spec
+        containers:
+        - name: sglang-worker
+          image: *common-image
+          imagePullPolicy: Always
+          command: [ "python3", "-m", "sglang.launch_server" ]
+          args: *common-args
+          env: *common-env
+          ports: *common-ports
+          resources: *common-resources
+          startupProbe: *startup-probe
+          readinessProbe: *readiness-probe
+          livenessProbe: *liveness-probe
+          volumeMounts: *common-volume-mounts
+          securityContext: *common-security-context
+        volumes: *common-volumes
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glm-5-2-lws-leader
+spec:
+  selector:
+    leaderworkerset.sigs.k8s.io/name: lws-glm-5-2-sglang
+    role: leader
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: http
+  - name: nccl
+    protocol: TCP
+    port: 20000
+    targetPort: nccl
+  type: ClusterIP

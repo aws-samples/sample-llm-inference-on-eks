@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-llama-70b-sglang
+  labels:
+    app: deepseek-llama-70b
+    engine: sglang
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepseek-llama-70b-sglang
+      engine: sglang
+  template:
+    metadata:
+      labels:
+        app: deepseek-llama-70b-sglang
+        model: deepseek-r1-distill-llama-70b
+        engine: sglang
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p4d.24xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: deepseek
+        image: docker.io/lmsysorg/sglang:v0.5.13.post1
+        imagePullPolicy: Always # IfNotPresent or Never
+        command: [ "python3", "-m", "sglang.launch_server" ]
+        args: [
+          "--model-path", "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+          "--host", "0.0.0.0",
+          "--port", "8000",
+          "--context-length", "4096",
+          "--tensor-parallel-size", "8",
+          "--mem-fraction-static", "0.9",
+          "--trust-remote-code",
+          "--disable-custom-all-reduce",
+          "--enable-p2p-check",
+          "--enable-nccl-nvls",
+          "--enable-flashinfer-mla", 
+        ]
+        env:
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_P2P_DISABLE
+          value: "0"
+        - name: NCCL_P2P_LEVEL
+          value: "NVL"
+        - name: NCCL_NVLS_ENABLE
+          value: "1"
+        - name: NCCL_IGNORE_DISABLED_P2P
+          value: "1"
+        - name: NCCL_CUMEM_ENABLE
+          value: "1"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "64"
+            memory: 1024G
+            ephemeral-storage: 1000Gi
+            nvidia.com/gpu: "8"
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /mnt/k8s-disks/0/models/deepseek
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "80Gi"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-svc-llama-70b-sglang
+spec:
+  selector:
+    app: deepseek-llama-70b-sglang
+    engine: sglang
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP

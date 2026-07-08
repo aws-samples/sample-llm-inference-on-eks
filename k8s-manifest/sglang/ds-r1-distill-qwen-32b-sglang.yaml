@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-qwen-32b-sglang
+  labels:
+    app: deepseek-qwen-32b
+    engine: sglang
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepseek-qwen-32b-sglang
+      engine: sglang
+  template:
+    metadata:
+      labels:
+        app: deepseek-qwen-32b-sglang
+        model: deepseek-r1-distill-qwen-32b
+        engine: sglang
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: g6e.12xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: deepsek
+        image: docker.io/lmsysorg/sglang:v0.5.13.post1
+        imagePullPolicy: Always # IfNotPresent or Never
+        command: [ "python3", "-m", "sglang.launch_server" ]
+        args: [ "--model", "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", "--trust-remote-code", "--tp", "2", "--host", "0.0.0.0", "--port", "8000", "--disable-custom-all-reduce" ]
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "32"
+            memory: 100G
+            nvidia.com/gpu: "2"
+          requests:
+            cpu: "20"
+            memory: 100G
+            nvidia.com/gpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /tmp/deepseek
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "4Gi"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-svc-qwen-32b-sglang
+spec:
+  selector:
+    app: deepseek-qwen-32b-sglang
+  ports:
+  - protocol: TCP
+    port: 80 # port on host
+    targetPort: http # port in container
+  type: ClusterIP

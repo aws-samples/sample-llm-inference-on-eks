@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-qwen-32b-vllm
+  labels:
+    app: deepseek-qwen-32b
+    engine: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepseek-qwen-32b
+      engine: vllm
+  template:
+    metadata:
+      labels:
+        app: deepseek-qwen-32b
+        engine: vllm
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: g6e.12xlarge # 4 L40S GPU, 192G GPU Memory
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: deepseek
+        image: vllm/vllm-openai:v0.24.0
+        command: [ "/bin/sh", "-c" ]
+        args: [ "vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-32B --tensor-parallel-size 2 --max-model-len 32768 --enforce-eager" ]
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "32"
+            memory: 100G
+            nvidia.com/gpu: "2"
+          requests:
+            cpu: "20"
+            memory: 100G
+            nvidia.com/gpu: "2"
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /tmp/deepseek
+          type: DirectoryOrCreate
+      # vLLM needs to access the host's shared memory for tensor parallel inference.
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "4Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-svc-qwen-32b-vllm
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: http
+  selector:
+    app: deepseek-qwen-32b
+    engine: vllm
+  type: ClusterIP

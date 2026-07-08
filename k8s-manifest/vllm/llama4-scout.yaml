@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama4-scout
+  labels:
+    app: llama4-scout
+    engine: sglang
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llama4-scout
+      engine: sglang
+  template:
+    metadata:
+      labels:
+        app: llama4-scout
+        model: llama4-scout
+        engine: sglang
+        size: 109B
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p5en.48xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: llama4-scout
+        image: vllm/vllm-openai:v0.24.0
+        command: [ "/bin/sh", "-c" ]
+        args: [ "vllm serve unsloth/Llama-4-Scout-17B-16E-Instruct --tensor-parallel-size 8 --max-model-len 1000000 --enforce-eager" ]
+        env:
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_P2P_DISABLE
+          value: "0"
+        - name: NCCL_P2P_LEVEL
+          value: "NVL"
+        - name: NCCL_NVLS_ENABLE
+          value: "1"
+        - name: TORCH_USE_CUDA_DSA
+          value: "1"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: "8"
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /mnt/k8s-disks/0/models/llama4-scout
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "500Gi"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama4-scout
+spec:
+  selector:
+    app: llama4-scout
+    engine: sglang
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP

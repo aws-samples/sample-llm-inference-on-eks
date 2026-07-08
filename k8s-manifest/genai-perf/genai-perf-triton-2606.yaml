@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-26-06
+  labels:
+    app: triton-26-06
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: triton-26-06
+  template:
+    metadata:
+      labels:
+        app: triton-26-06
+    spec:
+      containers:
+      - name: triton
+        image: nvcr.io/nvidia/tritonserver:26.06-py3-sdk
+        imagePullPolicy: IfNotPresent
+        command: ["sleep", "infinity"]
+        # genai-perf is a pure HTTP load client — no GPU needed
+        resources:
+          requests:
+            cpu: "2"
+            memory: 8Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi

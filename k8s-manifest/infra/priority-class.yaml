@@ -1,0 +1,8 @@
+# Priority class definition to add before or after the existing resources
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority-100
+value: 100
+globalDefault: false
+description: "High priority class for DeepSeek deployment"

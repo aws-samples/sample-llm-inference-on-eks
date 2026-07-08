@@ -1,0 +1,44 @@
+name: Validate manifests
+on:
+  push:
+    branches: [main]
+    paths: ['**/*.yaml', '**/*.yml']
+  pull_request:
+    paths: ['**/*.yaml', '**/*.yml']
+jobs:
+  kubeconform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+      - name: Render placeholders and resolve YAML anchors
+        run: |
+          pip install --quiet pyyaml
+          # 1) substitute <ACCOUNT_ID>/<REGION> placeholders so images parse
+          # 2) round-trip through PyYAML to expand anchors/merge keys
+          #    (<<: *x with overrides is valid YAML 1.1 and fine for kubectl,
+          #    but kubeconform's YAML->JSON step rejects the duplicate keys)
+          python3 - <<'EOF'
+          import pathlib, yaml
+          out_root = pathlib.Path('/tmp/rendered')
+          for src in pathlib.Path('k8s-manifest').rglob('*.yaml'):
+              text = src.read_text()
+              text = text.replace('<ACCOUNT_ID>', '000000000000').replace('<REGION>', 'us-west-2')
+              docs = [d for d in yaml.safe_load_all(text) if d is not None]
+              dst = out_root / src
+              dst.parent.mkdir(parents=True, exist_ok=True)
+              dst.write_text(yaml.safe_dump_all(docs, sort_keys=False))
+          print('rendered all manifests')
+          EOF
+      - name: kubeconform
+        run: |
+          # LeaderWorkerSet and Karpenter are CRDs — validate against the CRD
+          # catalog; skip kinds with no published schema
+          kubeconform -summary -strict \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -ignore-missing-schemas \
+            /tmp/rendered

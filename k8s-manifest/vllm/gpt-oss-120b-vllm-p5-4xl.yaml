@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gptoss-vllm
+  labels:
+    app: gptoss
+    engine: vllm
+spec:
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gptoss
+      engine: vllm
+  template:
+    metadata:
+      labels:
+        app: gptoss
+        engine: vllm
+    spec:
+      nodeSelector:
+        node.kubernetes.io/instance-type: p5.4xlarge
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: model
+          image: vllm/vllm-openai:gptoss
+          command: [ "vllm", "serve" ]
+          args:
+          - openai/gpt-oss-120b
+          - --gpu-memory-utilization=0.95
+          - --max-num-batched-tokens=1024
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - mountPath: /root/.cache/huggingface
+              name: cache-volume
+            - name: shm
+              mountPath: /dev/shm
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 60
+      volumes:
+        - name: cache-volume
+          hostPath:
+            path: /mnt/k8s-disks/0/models/gpt-oss
+            type: DirectoryOrCreate
+        # vLLM needs to access the host's shared memory for tensor parallel inference.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "20Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gptoss-vllm
+spec:
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: gptoss
+    engine: vllm
+  type: ClusterIP

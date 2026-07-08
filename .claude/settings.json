@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; case \"$f\" in *k8s-manifest/*.yaml|*k8s-manifest/*.yml|*/docs/*.md) if git status --porcelain --untracked-files=all -- \"$f\" 2>/dev/null | grep -qE '^(\\?\\?|A )'; then printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"A new file was just added to this repo (%s). Per project convention, update README.md and docs/MODEL-INDEX.md to reference it (add the model/manifest entry to MODEL-INDEX; keep the README structure section current).\"}}' \"$f\"; fi;; esac; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

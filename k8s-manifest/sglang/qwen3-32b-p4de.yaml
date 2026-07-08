@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-32b-sglang
+  labels:
+    app: qwen-32b
+    engine: sglang
+spec:
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: qwen-32b-sglang
+      engine: sglang
+  template:
+    metadata:
+      labels:
+        app: qwen-32b-sglang
+        model: qwen-32b
+        engine: sglang
+    spec:
+      # priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p4de.24xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: sglang
+        image: docker.io/lmsysorg/sglang:v0.5.13.post1
+        imagePullPolicy: Always # IfNotPresent or Never
+        command: [ "python3", "-m", "sglang.launch_server" ]
+        args:
+        - "--model=Qwen/Qwen3-32B"
+        - "--host=0.0.0.0"
+        - "--port=8000"
+        - "--reasoning-parser=qwen3"
+        # - "--tp=1"
+        - "--trust-remote-code"
+        - "--enable-metrics"
+        - "--disable-custom-all-reduce"
+        env:
+        - name: TORCH_USE_CUDA_DSA
+          value: "1"
+        - name: SGL_ENABLE_JIT_DEEPGEMM
+          value: "0"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        startupProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 60
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 600
+          periodSeconds: 60
+          timeoutSeconds: 30
+          failureThreshold: 5
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /tmp/deepseek
+          type: DirectoryOrCreate
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "8Gi"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-32b-sglang-svc
+spec:
+  selector:
+    app: qwen-32b-sglang
+  ports:
+  - protocol: TCP
+    port: 80 # port on host
+    targetPort: http # port in container
+  type: ClusterIP
