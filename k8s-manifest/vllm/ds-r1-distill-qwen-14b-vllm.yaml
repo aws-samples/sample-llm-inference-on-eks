@@ -37,7 +37,7 @@ spec:
           sizeLimit: "2Gi"
       containers:
       - name: deepseek
-        image: vllm/vllm-openai:v0.24.0
+        image: vllm/vllm-openai:v0.25.1
         command: [ "/bin/sh", "-c" ]
         args: [ "vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-14B  --max-model-len 32768 --enforce-eager" ]
         ports:
