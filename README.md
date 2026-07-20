@@ -28,6 +28,7 @@ manifest with instance types and maintenance status.
 
 - [Repository Layout](#repository-layout)
 - [Deployment Shapes](#deployment-shapes)
+- [Creating a Cluster](#creating-a-cluster)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Load Testing](#load-testing)
@@ -87,10 +88,44 @@ flowchart LR
 Head-to-head numbers for all three shapes on the same hardware:
 [docs/GLM-5.2-BENCHMARK.md](docs/GLM-5.2-BENCHMARK.md).
 
+## Creating a Cluster
+
+The manifests assume an existing EKS cluster. The `k8s-manifest/infra/`
+NodePool targets the built-in `default` NodeClass provided by
+[EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html),
+which bundles Karpenter and the NVIDIA GPU device plugin — so an Auto Mode
+cluster satisfies the prerequisites with no extra add-ons:
+
+```bash
+eksctl create cluster --name llm-inference --region us-east-1 --enable-auto-mode
+```
+
+Before creating the cluster, confirm you have GPU capacity in your account —
+a fresh account often has a `0` limit for these, and Karpenter will silently
+fail to provision until it's raised:
+
+```bash
+# "Running On-Demand G and VT instances" (vCPUs); need >= the largest node you deploy
+aws service-quotas get-service-quota \
+  --service-code ec2 --quota-code L-DB2E81BA --region us-east-1 \
+  --query 'Quota.Value'
+```
+
+Then apply the cluster prerequisites and continue to [Quick Start](#quick-start):
+
+```bash
+kubectl apply -f k8s-manifest/infra/
+```
+
+> Already have a Karpenter-enabled cluster? Skip this section — just ensure the
+> NodePool in `k8s-manifest/infra/nodepool.yaml` references a NodeClass that
+> exists in your cluster (Auto Mode's is named `default`).
+
 ## Prerequisites
 
 - An EKS cluster with [Karpenter](https://karpenter.sh/) and GPU capacity for
-  the instance types named in each manifest (`nodeSelector`)
+  the instance types named in each manifest (`nodeSelector`) — see
+  [Creating a Cluster](#creating-a-cluster) for a from-scratch EKS Auto Mode setup
 - Cluster prerequisites applied:
 
   ```bash
