@@ -24,7 +24,7 @@ spec:
         node.kubernetes.io/instance-type: g6e.12xlarge # 4 L40S GPU, 192G GPU Memory
       containers:
       - name: deepseek
-        image: vllm/vllm-openai:v0.24.0
+        image: vllm/vllm-openai:v0.25.1
         command: [ "/bin/sh", "-c" ]
         args: [ "vllm serve deepseek-ai/DeepSeek-R1-Distill-Llama-70B --tensor-parallel-size 4 --max-model-len 32768 --enforce-eager" ]
         env:
