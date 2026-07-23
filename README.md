@@ -105,9 +105,14 @@ a fresh account often has a `0` limit for these, and Karpenter will silently
 fail to provision until it's raised:
 
 ```bash
-# "Running On-Demand G and VT instances" (vCPUs); need >= the largest node you deploy
+# "Running On-Demand G and VT instances" (vCPUs) — entry-level g6e manifests
 aws service-quotas get-service-quota \
   --service-code ec2 --quota-code L-DB2E81BA --region us-east-1 \
+  --query 'Quota.Value'
+
+# "Running On-Demand P instances" (vCPUs) — flagship p5/p5en examples (GLM-5.2, DeepSeek-R1/V3)
+aws service-quotas get-service-quota \
+  --service-code ec2 --quota-code L-417A185B --region us-east-1 \
   --query 'Quota.Value'
 ```
 
