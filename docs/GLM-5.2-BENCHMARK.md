@@ -3,7 +3,7 @@
 **Date**: 2026-07-07 → 07-08
 **Model**: `zai-org/GLM-5.2-FP8` — 753B MoE (DSA sparse attention, 256 experts/top-8, 1 MTP layer), FP8 weights ~756 GB
 **Hardware**: p5en.48xlarge (8× H200 141 GB, 16× EFA), Karpenter `reserved-capacity-pool` (us-west-2d capacity block)
-**Load generator**: NVIDIA genai-perf 0.0.16.post1 (Triton 26.06 SDK pod, in-cluster); `sglang.bench_serving` for PD-router runs and all decode-heavy runs (genai-perf SSE parser fails against the router at concurrency 40)
+**Load generator**: NVIDIA genai-perf 0.0.16.post1 (Triton 26.06 SDK pod, in-cluster); `sglang.bench_serving` for PD-router runs and all decode-heavy runs (genai-perf SSE parser fails against the router at concurrency 40). **Measurement volume was left at genai-perf's defaults — see the warning below; TTFT figures are not steady-state.**
 
 The report covers three experiment campaigns, each with its own question:
 
@@ -25,13 +25,36 @@ All runs use the same profile unless noted:
 | Thinking mode | **off** — `{"chat_template_kwargs":{"enable_thinking":false}}` (nested form required; flat `enable_thinking` is ignored) |
 | Endpoint | streaming `/v1/chat/completions`, in-cluster ClusterIP |
 
-genai-perf reports ~40 requests counted per run — it measures a steady-state window inside `--num-prompts 100`; the numbers are valid.
+> [!WARNING]
+> **The TTFT figures in this report are not steady-state measurements. Do not cite
+> them as absolute latency, and do not compare them across concurrency levels.**
+>
+> Every genai-perf run below used the tool's defaults for measurement volume. Those
+> defaults send `max(10, 2 × concurrency)` requests — 40 at concurrency 20, 80 at
+> concurrency 40 — which is **two requests per concurrency slot**. `--num-prompts`
+> does not change this; it only sizes the sampling pool. genai-perf also defaults
+> `--stability-percentage` to `999`, so nothing checked whether the queue had
+> settled, and nothing warned that it had not.
+>
+> The per-request distributions confirm it had not. At concurrency 20 (row L2) TTFT
+> climbs across the whole run — p10 840 ms, p25 878 ms, p50 2,458 ms, p75 10,062 ms,
+> p90 14,813 ms, max 17,624 ms — a 21× spread with no plateau: the queue was still
+> growing when the run ended. At concurrency 40 (row L3) the distribution flattens
+> (p50 1,230 ms, p75 1,541 ms, p90 1,542 ms, max 2,440 ms).
+>
+> **Throughput and ITL are much less affected** and remain usable — they are
+> rate measurements, not queue-depth measurements. Re-measurement of TTFT with
+> `--measurement-interval` + `--stability-percentage 10` is tracked in Open Items.
+> Correct methodology: [benchmark-commands.md](benchmark-commands.md#measuring-steady-state).
 
 ## Executive Summary
 
 Six configurations were benchmarked across four deployment shapes. Key numbers (concurrency as noted):
 
-| # | Shape | Config | Conc. | TTFT p50 | TTFT p90/p99 | ITL avg | tok/s/user | **Total tok/s** | Stable |
+TTFT columns are struck through: per the warning above they are not steady-state
+values. They are left in place for traceability, not for citation.
+
+| # | Shape | Config | Conc. | ~~TTFT p50~~ | ~~TTFT p90/p99~~ | ITL avg | tok/s/user | **Total tok/s** | Stable |
 |---|---|---|---|---|---|---|---|---|---|
 | R1 | 1-node TP8 SGLang | chunk 2048 (default), mem 0.85, MTP 5-1-6 | 20 | 2,040 ms | 14,656 / 17,160 ms | 27.9 ms | 40.1 | 476 | ✅ |
 | R2 | 1-node TP8 SGLang | chunk 32K (16K eff.), mem 0.85 | 20 | — | — | — | — | — | ❌ OOM |
@@ -47,7 +70,7 @@ Six configurations were benchmarked across four deployment shapes. Key numbers (
 | Priority | Recommended shape | Why |
 |---|---|---|
 | Max throughput per dollar | **2× independent TP8 replicas** (extrapolated ~912 tok/s) | No cross-node allreduce tax; each node at full efficiency. *Not yet measured — see Open Items.* |
-| Hard TTFT SLO at high concurrency | **2-node TP16 (LWS + EFA)** | Only shape with TTFT p99 < 2.5 s at concurrency 40 |
+| Hard TTFT SLO at high concurrency | **Undetermined — needs re-measurement** | The previous recommendation rested on TP16's concurrency-40 TTFT p99, which is not a steady-state number (see warning above). TP16's *throughput* advantage at concurrency 40 (730 tok/s) stands. |
 | Low concurrency / single-node budget | 1-node TP8, SGLang or vLLM (they tie) | ~455 tok/s wall; fine for ≤10 concurrent 8K requests |
 | Strict ITL SLO or decode-heavy workloads | ~~PD disaggregation~~ **1-node TP8** | PD 1P+1D lost the decode-heavy rematch too (see § Decode-heavy workload); its only surviving edge is ITL *variance*, at a 37% ITL-mean cost |
 
@@ -76,7 +99,22 @@ SGLang's default `max_prefill_tokens=16384` caps the effective chunk. Setting `-
 
 ### 5. TP16 needs concurrency ≥ ~40 to justify itself
 
-At concurrency 20, TP16 was *worse* than TP8 (396 vs 456 tok/s): 16 GPUs under-fed, and every decode step pays two cross-node EFA allreduces (ITL 27.5 → 32.4 ms). At concurrency 40 it transforms: prefill bursts are absorbed whole — TTFT p90 collapsed from 14.8 s to **1.5 s** (10×) and throughput hit 730 tok/s. The cost is per-user decode speed (26 vs 39 tok/s) — the allreduce tax again.
+At concurrency 20, TP16 was *worse* than TP8 (396 vs 456 tok/s): 16 GPUs under-fed, and every decode step pays two cross-node EFA allreduces (ITL 27.5 → 32.4 ms). At concurrency 40 throughput rose to 730 tok/s — an 1.84× gain over its own concurrency-20 result. The cost is per-user decode speed (26 vs 39 tok/s) — the allreduce tax again.
+
+> [!CAUTION]
+> **Retracted (2026-07-28):** this finding previously claimed TTFT p90 "collapsed
+> from 14.8 s to 1.5 s (10×)" at concurrency 40, attributed to prefill bursts being
+> absorbed whole. That comparison is withdrawn — both runs measured only two
+> requests per concurrency slot, and the concurrency-20 distribution never reached a
+> plateau (see the warning at the top of this report). Whether TP16 genuinely
+> improves TTFT at higher concurrency is **unresolved** and needs re-measurement
+> with a proper measurement window; the throughput figures above are unaffected.
+>
+> A follow-up experiment on cheaper hardware (1× L40S, Qwen3-8B, 2K/256) confirmed
+> that short measurement windows understate TTFT badly, but did **not** reproduce a
+> direction reversal — TTFT degraded monotonically with concurrency under every
+> measurement length tested. So the mechanism behind this specific 10× figure
+> remains unexplained; it is not simply an artifact of measuring too briefly.
 
 ### 6. PD 1P:1D is the wrong ratio for an 8:1 ISL:OSL workload
 
@@ -142,7 +180,13 @@ home turf — short prompts, long generations, where decode purity should shine?
 
 each at concurrency 20 (60 prompts) and 40 (120 prompts).
 
-**Results.**
+> [!NOTE]
+> These runs used `sglang.bench_serving`, whose `--num-prompts` *is* the real request
+> count — so unlike the 07-07 genai-perf runs, the volume here was not silently
+> capped. It was still only **3 requests per concurrency slot** (60/20, 120/40),
+> which is short of steady state. Treat the TTFT rows as indicative of the
+> TP8-vs-PD *gap* (a 5× difference is well outside what measurement length explains)
+> rather than as absolute latency. Throughput and ITL are unaffected.
 
 | Metric | TP8 c20 | PD c20 | TP8 c40 | PD c40 |
 |---|---|---|---|---|
@@ -168,11 +212,25 @@ untested chances are structural, not workload-shaped: asymmetric xP:yD scaling a
 size, or a shared KV store that removes the per-request P→D push (Open items 2/4).
 
 Corollary: the decode-heavy numbers also strengthen the un-measured "2× TP8 + LB"
-recommendation — a single TP8 node already sustains 1,521 tok/s at c40 with sub-second
-median TTFT on this profile.
+recommendation — a single TP8 node already sustains 1,521 tok/s at c40 on this
+profile. (The "sub-second median TTFT" that previously accompanied this sentence is
+dropped — see the note above on measurement volume.)
 
 ## Open items
 
+0. **Re-measure all TTFT figures with a real measurement window** (blocks any latency
+   claim from this report). Every run here used genai-perf's default measurement
+   volume — two requests per concurrency slot — so no TTFT number is a steady-state
+   value. Requires: `--measurement-interval` sized from the observed request
+   throughput (≥10 requests per slot across the 3 windows perf_analyzer averages —
+   at the 0.39 req/s measured for TP16 c20 that is ~180 s; see the sizing formula in
+   [benchmark-commands.md](benchmark-commands.md#measuring-steady-state)),
+   `--stability-percentage 10`,
+   `--num-prompts` above the total request count, and **≥4 concurrency points** so a
+   single outlier can be told apart from a trend. Both TP8 and TP16 must be
+   re-measured together; pairing old TP8 numbers with new TP16 numbers is not a
+   valid comparison. Needs 2× p5en.48xlarge, and the us-west-2d capacity block has
+   expired.
 1. **2× TP8 replicas at c40** — the throughput-per-dollar favorite is extrapolated (456 × 2 ≈ 912 tok/s on 8K/1K; ~3,000 tok/s on 1K/4K), not measured. Requires freeing the PD nodes and scaling `glm-5-2` to `replicas: 2`.
 2. PD at 2P:1D ratio (3 nodes) — the last untested PD configuration, only relevant if fleet-level asymmetric scaling is on the table (1P+1D is ruled out for both workload shapes).
 3. MTP acceptance-length telemetry was not collected; draft-token tuning was done on cookbook guidance, not measured accept rates.
@@ -181,20 +239,32 @@ median TTFT on this profile.
 
 ## Reproduce
 
+The command below is **corrected methodology**, not what produced the tables above.
+The original runs omitted `--measurement-interval` / `--stability-percentage` and
+therefore measured only two requests per concurrency slot — that is exactly the
+defect recorded in the warning at the top. Numbers from this command will not match
+the tables; that is the point.
+
 ```bash
 # client pod: Triton 26.06 SDK (genai-perf + transformers 5.x)
 kubectl exec deploy/triton-26-06 -- bash -lc "
 genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --url <service>.default.svc.cluster.local:80 \
   --endpoint-type chat --streaming \
-  --num-prompts 100 \
+  --concurrency 20 \
+  --measurement-interval 180000 \
+  --stability-percentage 10 \
+  --warmup-request-count 20 \
+  --num-prompts 2000 \
   --synthetic-input-tokens-mean 8000 --synthetic-input-tokens-stddev 0 \
   --output-tokens-mean 1024 --output-tokens-stddev 0 \
-  --concurrency 20 \
   --tokenizer zai-org/GLM-5.2-FP8 \
   --extra-inputs max_tokens:1024 \
   --extra-inputs ignore_eos:true \
   --extra-inputs '{\"chat_template_kwargs\":{\"enable_thinking\":false}}'"
+# 180 s window: at the ~0.39 req/s this workload sustained at c20, three windows
+# give ~210 requests (>10 per slot). Scale it with measured request throughput —
+# see benchmark-commands.md#measuring-steady-state.
 
 # alternative when genai-perf's SSE parser chokes (PD router, high concurrency):
 python3 -m sglang.bench_serving --backend sglang-oai-chat \

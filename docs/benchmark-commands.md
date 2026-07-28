@@ -65,7 +65,7 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --url glm-5-2.default.svc.cluster.local:80 \
   --endpoint-type chat --streaming \
   --concurrency 20 \
-  --measurement-interval 60000 \
+  --measurement-interval 180000 \
   --stability-percentage 10 \
   --warmup-request-count 20 \
   --num-prompts 2000 \
@@ -78,7 +78,9 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
 ```
 
 Set `--warmup-request-count` to the concurrency value (one warm request per slot;
-warmup records are discarded by perf_analyzer and never enter the report).
+warmup records are discarded by perf_analyzer and never enter the report). The
+`180000` above is derived for *this* workload — see
+[Measuring steady state](#measuring-steady-state) for how to size it for yours.
 
 Known issue: at concurrency ≥40 against the sglang-router (PD setups), the SSE
 parser intermittently fails (`splintered SSE response` / `orjson.JSONDecodeError`)
@@ -119,9 +121,25 @@ request-count mode (the two are mutually exclusive):
 
 perf_analyzer then repeats measurement windows until the max/min ratio across the
 most recent 3 windows is within the threshold for both throughput and latency.
-Start at `--measurement-interval 60000` and treat it as a starting point, not a
-constant: a slower workload (longer inputs, bigger model) fits fewer requests into
-the same window and may need a longer one.
+
+**Size the interval from measured request throughput — do not copy a constant.**
+Aim for at least 10 requests per concurrency slot across the 3 windows:
+
+```
+interval_ms ≳ (10 × concurrency) / (3 × requests_per_sec) × 1000
+```
+
+Get `requests_per_sec` from a short throwaway run (it is in the report as *Request
+Throughput*), then round up. Two worked examples, same tooling, three orders of
+magnitude apart in workload:
+
+| Workload | Request throughput | Interval |
+|---|---|---|
+| 8B model, 2K-in/256-out, c20 | ~1.8 /s | 60 s |
+| 753B MoE, 8K-in/1K-out, c20 | ~0.39 /s | 180 s |
+
+Also keep the interval well above a single request's end-to-end latency, or a window
+can close with almost nothing completed inside it.
 
 Keep `--num-prompts` larger than the total requests the run will issue. If the pool
 is smaller, prompts get reused, prefix-cache hit rate climbs mid-run, and TTFT
