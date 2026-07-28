@@ -1,8 +1,15 @@
 # Benchmark & Smoke-Test Command Reference
 
-Copy-paste reference for load-testing models deployed in this repo (formerly `prompts.sh`).
-Commands are grouped by **tool generation** — flags changed incompatibly between versions,
-so match the command shape to the genai-perf version in your client pod
+**Use genai-perf** — it is the tool of record for every benchmark in this repo.
+Jump to [genai-perf 0.0.16+](#genai-perf-0016-triton-sdk-2606-genai-perfgenai-perf-triton-2606yaml--current)
+and read [Measuring steady state](#measuring-steady-state) before your first run;
+the defaults produce optimistic latency numbers. The engine-native harnesses at the
+bottom (`sglang.bench_serving`, `vllm bench serve`) are listed for reference only —
+they define concurrency and latency differently, so results are **not comparable**
+with genai-perf's or with each other. Do not mix tools within one comparison.
+
+genai-perf commands are grouped by **tool generation** — flags changed incompatibly
+between versions, so match the command shape to the version in your client pod
 (`genai-perf --version`).
 
 ## Quick smoke test (any OpenAI-compatible endpoint)
@@ -50,26 +57,95 @@ Breaking changes vs legacy:
   `key:{json}` form fails (parser splits on first `:`)
 - Pin OSL exactly with `max_tokens` + `ignore_eos` — `--output-tokens-mean` alone
   doesn't guarantee it on OpenAI chat endpoints
+- **Set the measurement window explicitly** — the defaults do not measure steady
+  state (see [Measuring steady state](#measuring-steady-state) below)
 
 ```bash
 genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --url glm-5-2.default.svc.cluster.local:80 \
   --endpoint-type chat --streaming \
-  --num-prompts 100 \
+  --concurrency 20 \
+  --measurement-interval 60000 \
+  --stability-percentage 10 \
+  --warmup-request-count 20 \
+  --num-prompts 2000 \
   --synthetic-input-tokens-mean 8000 --synthetic-input-tokens-stddev 0 \
   --output-tokens-mean 1024 --output-tokens-stddev 0 \
-  --concurrency 20 \
   --tokenizer zai-org/GLM-5.2-FP8 \
   --extra-inputs max_tokens:1024 \
   --extra-inputs ignore_eos:true \
   --extra-inputs '{"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
+Set `--warmup-request-count` to the concurrency value (one warm request per slot;
+warmup records are discarded by perf_analyzer and never enter the report).
+
 Known issue: at concurrency ≥40 against the sglang-router (PD setups), the SSE
 parser intermittently fails (`splintered SSE response` / `orjson.JSONDecodeError`)
-even though the backend is healthy. Use `sglang.bench_serving` below instead.
+even though the backend is healthy. This is the one case where a fallback is
+justified — but a run switched to `sglang.bench_serving` cannot be compared against
+genai-perf runs, so switch the *whole* comparison or none of it.
 
-## sglang.bench_serving (ships inside sglang images) — router-safe alternative
+## Measuring steady state
+
+**The genai-perf defaults do not produce steady-state latency numbers.** Verified
+against the 0.0.16.post1 source, the NVIDIA docs, and by experiment on this repo's
+hardware. Three facts drive this:
+
+1. **`--num-prompts` does not control how much load is sent.** It is an alias for
+   `--num-dataset-entries` — "the number of unique payloads to sample from. These
+   will be reused until benchmarking is complete." Raising it does not lengthen the
+   run.
+2. **Without an explicit measurement window, genai-perf sends
+   `max(10, 2 × concurrency)` requests** — it computes this and passes it to
+   perf_analyzer as `--request-count`
+   (`genai_perf/config/generate/perf_analyzer_config.py::_calculate_request_count`).
+   Two requests per concurrency slot is not enough for the queue to fill, so
+   latency is sampled while the server is still ramping up.
+3. **genai-perf defaults `--stability-percentage` to `999`** (perf_analyzer's own
+   default is `10`), which makes the stability check pass unconditionally. Nothing
+   warns you that the run never stabilised.
+
+Latency read this way is optimistic by roughly an order of magnitude, and the error
+grows with concurrency. Throughput is much less affected, and *trends* across
+concurrency levels survive — it is the absolute latency figures that are unusable.
+
+Use time-window mode with a real stability threshold instead of the default
+request-count mode (the two are mutually exclusive):
+
+```
+--measurement-interval <ms>  --stability-percentage 10
+```
+
+perf_analyzer then repeats measurement windows until the max/min ratio across the
+most recent 3 windows is within the threshold for both throughput and latency.
+Start at `--measurement-interval 60000` and treat it as a starting point, not a
+constant: a slower workload (longer inputs, bigger model) fits fewer requests into
+the same window and may need a longer one.
+
+Keep `--num-prompts` larger than the total requests the run will issue. If the pool
+is smaller, prompts get reused, prefix-cache hit rate climbs mid-run, and TTFT
+drifts downward — a self-inflicted trend.
+
+The stability check compares whole windows against each other, so fluctuation with
+a period shorter than the window averages out inside it. Report **p50, p90 and p99**
+together rather than a single number. A p50 that improves as concurrency rises is a
+methodology red flag, not a result.
+
+---
+
+# Engine-native harnesses — reference only, not recommended
+
+Both tools below ship inside the engine images and are handy for a quick sanity
+check when genai-perf is unavailable. **Do not use them for reported numbers**:
+their concurrency models and latency definitions differ from genai-perf's, so
+figures are not comparable across tools. Anything published from this repo should
+come from genai-perf.
+
+## sglang.bench_serving (ships inside sglang images)
+
+Its `--num-prompts` *is* the real request count (unlike genai-perf's), and it
+survives the sglang-router at high concurrency where genai-perf's SSE parser fails.
 
 ```bash
 python3 -m sglang.bench_serving \

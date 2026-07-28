@@ -214,6 +214,12 @@ Condensed from the benchmark writeups — details in [docs/](docs/):
   decode idles.
 - **Reasoning models need thinking disabled for clean benchmarks** — nested
   `chat_template_kwargs.enable_thinking:false`, not a flat key.
+- **genai-perf defaults don't measure steady state** — it sends only
+  `2 × concurrency` requests and disables its own stability check, so latency
+  comes out optimistic by about an order of magnitude (`--num-prompts` is a
+  sampling pool, not a load knob). Use `--measurement-interval` with
+  `--stability-percentage 10` and verify:
+  [docs/benchmark-commands.md](docs/benchmark-commands.md#measuring-steady-state).
 
 ## Cleanup
 

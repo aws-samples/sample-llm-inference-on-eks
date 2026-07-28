@@ -56,6 +56,12 @@ KV-cache offload & externalization (HiCache / LMCache / Redis L2) measured in
 | Qwen3-32B, SGLang | `sglang/qwen3-32b-p4de.yaml` | p4de.24xlarge | 📦 |
 | Qwen3-32B, SGLang | `sglang/qwen3-32b-p5-4xl.yaml` | p5.4xlarge | 📦 |
 | Qwen2.5-VL-7B, vLLM | `vllm/qwen2.5-vl-7b.yaml` | g6e.2xlarge | 📦 |
+| Qwen3-8B, SGLang | `sglang/qwen3-8b-sglang-g6e-2xl.yaml` | g6e.2xlarge–16xlarge | ✅ |
+
+Qwen3-8B on a single L40S is the cheap rig for validating **benchmark methodology**
+(see [benchmark-commands.md](benchmark-commands.md#measuring-steady-state)) — it
+saturates fast enough to exercise queueing without needing p5-class capacity. Not a
+performance reference.
 
 ## Others
 
