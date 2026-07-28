@@ -69,7 +69,7 @@ Separate prefill and decode into independent clusters:
 - ❌ Environments without high-speed interconnect (>100Gbps)
 - ❌ Low-throughput workloads where simplicity matters
 
-**Key Requirement**: The network must be fast enough that KV cache transfer overhead is negligible compared to compute time. AWS EFA with RDMA provides ~400Gbps bandwidth, making transfer time <5% of total latency.
+**Key Requirement**: The network must be fast enough that KV cache transfer overhead is negligible compared to compute time. AWS EFA with RDMA provides up to 3,200 Gbps (400 GB/s) aggregate bandwidth on p5/p5en instances.
 
 ## Architecture
 
@@ -213,7 +213,7 @@ flowchart TB
 3. **Prefill → Decode (KV Cache Transfer via NIXL)**:
    - Prefill cluster transfers KV cache to decode cluster
    - Uses NIXL library with LIBFABRIC backend
-   - Transport: RDMA over AWS EFA (~400Gbps)
+   - Transport: RDMA over AWS EFA (up to 3,200 Gbps aggregate)
    - Time: 5-20ms for typical KV cache sizes (<5% of total latency)
 
 4. **Decode Cluster → Router**: Decode generates tokens one by one
@@ -244,8 +244,9 @@ KV Cache Size = 2 (K+V) × Layers × KV_Heads × Seq_Len × Head_Dim × 2 bytes
 
 **Transfer Time with EFA:**
 ```
-Bandwidth: 400 Gbps = 50 GB/s (theoretical)
-Effective: ~30-35 GB/s (achievable with RDMA)
+Bandwidth: 3,200 Gbps = 400 GB/s (aggregate theoretical, all network cards)
+Effective: ~30-35 GB/s (single-stream RDMA; one stream does not fan out
+           across all network cards)
 Transfer Time: 4GB / 35 GB/s ≈ 114ms
 
 Actual measured: 10-20ms (with compression and optimizations)
@@ -378,8 +379,8 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.7-nix
                    │ Hardware
 ┌──────────────────▼──────────────────────────────┐
 │  EFA Network Interface Cards                     │
-│  - 16x per p5.48xlarge node                     │
-│  - ~400 Gbps aggregate bandwidth                │
+│  - 16x per p5en.48xlarge node                   │
+│  - 3,200 Gbps (400 GB/s) aggregate              │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -534,10 +535,10 @@ resources:
 ```
 
 **Why request all 16 EFA interfaces:**
-- p5.48xlarge has 16 EFA interfaces
+- p5en.48xlarge has 16 network cards / EFA interfaces (p5.48xlarge has 32)
 - Requesting all maximizes inter-node bandwidth
 - NIXL and NCCL will use multiple interfaces in parallel
-- ~400 Gbps aggregate bandwidth for KV cache transfers
+- 3,200 Gbps (400 GB/s) aggregate bandwidth for KV cache transfers
 
 ### Volume Mounts
 
@@ -1065,15 +1066,16 @@ watch -n 1 'ethtool -S efa0 | grep -E "tx_bytes|rx_bytes"'
 
 **Measured during KV cache transfer:**
 - Single stream: ~30-35 GB/s
-- 16 EFA interfaces theoretical: 400 Gbps = 50 GB/s
-- Utilization: ~60-70% of theoretical maximum
-- Bottleneck: PCIe bandwidth from GPU to EFA NIC
+- 16 EFA interfaces aggregate theoretical: 3,200 Gbps = 400 GB/s
+- A single RDMA stream is bounded by one GPU's PCIe path, not by the
+  instance's aggregate fabric bandwidth
 
-**Why not 100% utilization:**
-- PCIe Gen5 x16: 63 GB/s bidirectional
-- Multiple EFA NICs share PCIe lanes
+**Why a single stream is far below aggregate:**
+- PCIe Gen5 x16: ~63 GB/s bidirectional per GPU
+- Reaching aggregate bandwidth requires many concurrent streams across
+  all 8 GPUs and all network cards
 - Protocol overhead (RDMA headers, etc.)
-- 60-70% is excellent for real-world workloads
+- ~30-35 GB/s for one stream is close to that stream's PCIe ceiling
 
 ---
 
@@ -1090,7 +1092,8 @@ PD disaggregation with SGLang on AWS EFA provides significant benefits for produ
 
 **Expected Performance:**
 - **KV Transfer Overhead**: <5% of total latency
-- **Network Bandwidth**: ~30-35 GB/s with EFA RDMA
+- **Network Bandwidth**: ~30-35 GB/s per RDMA stream (instance aggregate:
+  3,200 Gbps = 400 GB/s across all network cards)
 
 **When to Use:**
 - ✅ High-throughput production workloads (>1000 req/min)
@@ -1102,5 +1105,5 @@ PD disaggregation with SGLang on AWS EFA provides significant benefits for produ
 - NIXL must use LIBFABRIC backend (not UCX) for AWS EFA
 - EFA is not InfiniBand - requires libfabric API
 - RDMA is critical for low-latency KV cache transfer
-- Requesting all 16 EFA interfaces maximizes bandwidth
+- Requesting all EFA interfaces maximizes bandwidth
 - KV cache transfer overhead is negligible with proper setup
