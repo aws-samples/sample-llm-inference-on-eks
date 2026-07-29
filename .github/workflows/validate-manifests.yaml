@@ -2,9 +2,9 @@ name: Validate manifests
 on:
   push:
     branches: [main]
-    paths: ['**/*.yaml', '**/*.yml']
+    paths: ['k8s-manifest/**']
   pull_request:
-    paths: ['**/*.yaml', '**/*.yml']
+    paths: ['k8s-manifest/**']
 permissions:
   contents: read
 jobs:

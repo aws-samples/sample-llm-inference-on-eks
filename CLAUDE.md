@@ -27,6 +27,27 @@ This repo is published as a public sample. Committed manifests/docs use
   grep -rnE '[0-9]{12}\.dkr\.ecr|cr-[0-9a-f]{17}' --include='*.yaml' --include='*.md' --include='Dockerfile*' . | grep -v '^./local/'
   ```
 
+## Repo Layout — two cluster paths
+
+`k8s-manifest/` (the workloads) is the point of the repo;
+`infrastructure/terraform/` is an optional from-scratch cluster build. They are
+two **mutually exclusive** cluster styles, each supplying its own GPU NodePool:
+
+| | `k8s-manifest/infra/nodepool.yaml` | `infrastructure/terraform/` |
+|---|---|---|
+| Karpenter | EKS Auto Mode (bundled) | self-managed on Fargate |
+| NodePool name | `gpu-nodepool` | `gpu` |
+| NodeClass ref | `eks.amazonaws.com/NodeClass` `default` | `karpenter.k8s.aws/EC2NodeClass` `gpu` |
+
+The two NodePool names are intentionally distinct — do not "unify" them; identical
+names would let one path silently clobber the other's NodePool. Never tell a
+Terraform-path user to `kubectl apply -f k8s-manifest/infra/` (the Auto Mode
+NodeClass API isn't served there, so that NodePool would never become ready) —
+they apply `priority-class.yaml` only. Model manifests are portable across both
+because every GPU toleration uses `operator: Exists`; keep it that way. See
+`infrastructure/terraform/CLAUDE.md` for that stack's own conventions and
+architectural invariants.
+
 ## Repo Conventions
 
 - Manifest naming: `<model>-<engine>[-<instance>].yaml`; LWS:

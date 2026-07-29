@@ -1,0 +1,34 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: reserved-capacity
+spec:
+  # GPU capacity (P5 via ODCR) — same AMI resolution as node-classes/gpu.yaml
+  amiSelectorTerms:
+  - alias: al2023@latest
+  instanceStorePolicy: RAID0
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 800Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 150
+        encrypted: true
+        deleteOnTermination: true
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  role: ${cluster_name}
+  subnetSelectorTerms:
+  - tags:
+      karpenter.sh/discovery: ${cluster_name}
+  securityGroupSelectorTerms:
+  - tags:
+      karpenter.sh/discovery: ${cluster_name}
+  capacityReservationSelectorTerms:
+  - id: ${capacity_reservation_id}
+  tags:
+    karpenter.sh/discovery: ${cluster_name}

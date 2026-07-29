@@ -1,0 +1,37 @@
+name: Validate Terraform
+on:
+  push:
+    branches: [main]
+    paths: ['infrastructure/terraform/**']
+  pull_request:
+    paths: ['infrastructure/terraform/**']
+permissions:
+  contents: read
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.3
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+      - name: terraform init
+        # -backend=false: no AWS credentials needed and no state is touched;
+        # this only downloads providers/modules so validate can run.
+        run: terraform init -backend=false -input=false
+      - name: terraform validate
+        run: terraform validate
+      - name: shellcheck cleanup.sh
+        # Pinned rather than using the runner's preinstalled shellcheck (0.9.0),
+        # so results don't shift when the runner image bumps it.
+        run: |
+          curl -sSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            | tar xJ --strip-components=1 -C /usr/local/bin shellcheck-v0.11.0/shellcheck
+          shellcheck --version
+          shellcheck cleanup.sh

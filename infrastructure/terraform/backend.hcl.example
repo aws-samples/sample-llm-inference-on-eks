@@ -1,0 +1,9 @@
+# Copy to backend.hcl (git-ignored) and run:
+#   terraform init -backend-config=backend.hcl
+#
+# The bucket must already exist; Terraform will not create it. `use_lockfile`
+# is S3-native state locking (Terraform >= 1.10) — no DynamoDB table needed.
+bucket       = "<your-terraform-state-bucket>"
+region       = "us-west-2"
+key          = "llm-inference-on-eks/terraform.tfstate"
+use_lockfile = true

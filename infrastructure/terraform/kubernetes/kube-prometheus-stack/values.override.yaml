@@ -1,0 +1,175 @@
+## Create default rules for monitoring the cluster
+## Disable rules for unreachable components
+##
+defaultRules:
+  create: true
+  rules:
+    etcd: false
+    kubeScheduler: false
+
+## Disable component scraping for the kube controller manager, etcd, and kube-scheduler
+## These components are not reachable on EKS
+##
+kubeControllerManager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    ## Prometheus StorageSpec for persistent data on AWS EBS
+    ## ref: https://github.com/prometheus-operator/prometheus-operator/blob/main/Documentation/user-guides/storage.md
+    ##
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          # storageClassName: gp2
+          accessModes: [ "ReadWriteOnce" ]
+          resources:
+            requests:
+              storage: 50Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 2
+        memory: 4Gi
+    additionalScrapeConfigs:
+    - job_name: karpenter
+      kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+          - karpenter
+      relabel_configs:
+      - source_labels:
+        - __meta_kubernetes_endpoints_name
+        - __meta_kubernetes_endpoint_port_name
+        action: keep
+        regex: karpenter;http-metrics
+
+nodeExporter:
+  enabled: true
+prometheus-node-exporter:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: eks.amazonaws.com/compute-type
+            operator: NotIn
+            values:
+            - fargate
+
+alertmanager:
+  enabled: false
+  config:
+    global:
+      slack_api_url: ${slack_api_url}
+      resolve_timeout: 5m
+    route:
+      group_by: [ 'alertname' ]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: 'slack'
+      routes:
+      - match:
+          alertname: Watchdog
+        receiver: 'null'
+      - receiver: 'slack'
+        matchers:
+        - alertname =~ "InfoInhibitor|Watchdog"
+    receivers:
+    - name: 'null'
+    - name: 'slack'
+      slack_configs:
+      - channel: '#webhook-alerts'
+        title: "{{ range .Alerts }}{{ .Annotations.summary }}
+
+          {{ end }}"
+        text: "{{ range .Alerts }}{{ .Annotations.description }}
+
+          {{ end }}"
+        # text: 'https://internal.myorg.net/wiki/alerts/{{ .GroupLabels.app }}/{{ .GroupLabels.alertname }}'
+
+        ## Using default values from https://github.com/grafana/helm-charts/blob/main/charts/grafana/values.yaml
+        ##
+grafana:
+  enabled: true
+  adminPassword: asdf1234
+  defaultDashboardsTimezone: Asia/Hong_Kong
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+      - name: Prometheus
+        type: prometheus
+        version: 1
+        url: http://kube-prometheus-stack-prometheus.kube-prometheus-stack:9090/
+        access: proxy
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+  # serviceAccount:
+  #     name: "amp-iamproxy-query-service-account"
+  #     annotations:
+  #         eks.amazonaws.com/role-arn: "arn:aws:iam::account-id:role/amp-iamproxy-query-role"
+  dashboards:
+    default:
+      capacity-dashboard:
+        url: https://karpenter.sh/preview/getting-started/getting-started-with-karpenter/karpenter-capacity-dashboard.json
+      performance-dashboard:
+        url: https://karpenter.sh/preview/getting-started/getting-started-with-karpenter/karpenter-performance-dashboard.json
+      controller-allocation-dashboard:
+        url: https://karpenter.sh/preview/getting-started/getting-started-with-karpenter/karpenter-controllers-allocation.json
+      karpenter-controllers:
+        url: https://karpenter.sh/preview/getting-started/getting-started-with-karpenter/karpenter-controllers.json
+      karpenter:
+        gnetId: 18862
+        revision: 2
+        datasource: Prometheus
+      aws-load-balancer-controller:
+        gnetId: 18319
+        revision: 2
+        datasource: Prometheus
+      linux-nf_conntrack:
+        gnetId: 12033
+        revision: 1
+        datasource: Prometheus
+      jvm-micrometer:
+        gnetId: 4701
+        revision: 10
+        datasource: Prometheus
+
+  grafana.ini:
+    auth:
+      sigv4_auth_enabled: true
+  useStatefulSet: true
+  persistence:
+    type: pvc
+    enabled: disable
+    # storageClassName: default
+    accessModes:
+    - ReadWriteOnce
+    size: 10Gi
+  ingress:
+    ## No DNS domain / ACM cert in this account — no Ingress.
+    ## Access Grafana with:
+    ##   kubectl -n kube-prometheus-stack port-forward svc/kube-prometheus-stack-grafana 3000:80
+    ##
+    enabled: false

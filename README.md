@@ -1,6 +1,7 @@
 # LLM Inference on Amazon EKS with NVIDIA GPUs
 
 [![Validate manifests](https://github.com/aws-samples/sample-llm-inference-on-eks/actions/workflows/validate-manifests.yaml/badge.svg)](https://github.com/aws-samples/sample-llm-inference-on-eks/actions/workflows/validate-manifests.yaml)
+[![Validate Terraform](https://github.com/aws-samples/sample-llm-inference-on-eks/actions/workflows/validate-terraform.yaml/badge.svg)](https://github.com/aws-samples/sample-llm-inference-on-eks/actions/workflows/validate-terraform.yaml)
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)](LICENSE)
 [![Amazon EKS](https://img.shields.io/badge/Amazon-EKS-FF9900?logo=amazoneks&logoColor=white)](https://aws.amazon.com/eks/)
 [![SGLang](https://img.shields.io/badge/engine-SGLang-blue)](https://github.com/sgl-project/sglang)
@@ -43,8 +44,13 @@ manifest with instance types and maintenance status.
 ├── docs/
 │   ├── MODEL-INDEX.md          # By-model index of all manifests
 │   ├── GLM-5.2-BENCHMARK.md    # GLM-5.2 benchmark: TP8 vs TP16 vs PD-disagg on p5en
+│   ├── KIMI-K3-B300-PERFORMANCE.md    # Kimi-K3 2.8T on p6-b300 TP8 (EN)
+│   ├── KIMI-K3-B300-PERFORMANCE-zh.md # ^ 同一内容中文版
 │   ├── PD_DISAGGREGATION.md    # Prefill/decode disaggregation architecture deep-dive
 │   └── benchmark-commands.md   # genai-perf / bench_serving command reference
+├── infrastructure/
+│   └── terraform/              # Optional: build the cluster from scratch
+│                               # (self-managed Karpenter, GPU Operator, EFA plugin)
 └── k8s-manifest/
     ├── infra/                  # Cluster prerequisites: Karpenter NodePool, PriorityClass
     ├── sglang/                 # Single-node SGLang deployments
@@ -90,19 +96,22 @@ Head-to-head numbers for all three shapes on the same hardware:
 
 ## Creating a Cluster
 
-The manifests assume an existing EKS cluster. The `k8s-manifest/infra/`
-NodePool targets the built-in `default` NodeClass provided by
-[EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html),
-which bundles Karpenter and the NVIDIA GPU device plugin — so an Auto Mode
-cluster satisfies the prerequisites with no extra add-ons:
+The manifests assume an existing EKS cluster. Already have a Karpenter-enabled
+cluster with GPU capacity? Skip to [Prerequisites](#prerequisites). Otherwise
+pick **one** of two paths — they are mutually exclusive (see the note below):
 
-```bash
-eksctl create cluster --name llm-inference --region us-east-1 --enable-auto-mode
-```
+| | **A — EKS Auto Mode** | **B — Terraform** |
+|---|---|---|
+| Effort | one `eksctl` command | `terraform apply`, ~20 min |
+| Karpenter | bundled, AWS-managed | self-managed on Fargate, you control the version |
+| GPU device plugin | bundled | NVIDIA GPU Operator |
+| EFA device plugin | **not included** — install it yourself | included (`enable_aws_efa_device_plugin`) |
+| Networking | defaults | VPC + S3/ECR endpoints (no NAT cost for image pulls) |
+| Good for | trying the single-node examples fast | multi-node `lws/` examples, or reusing the stack |
 
-Before creating the cluster, confirm you have GPU capacity in your account —
-a fresh account often has a `0` limit for these, and Karpenter will silently
-fail to provision until it's raised:
+Either way, first confirm you have GPU capacity in your account — a fresh
+account often has a `0` limit for these, and Karpenter will silently fail to
+provision until it's raised:
 
 ```bash
 # "Running On-Demand G and VT instances" (vCPUs) — entry-level g6e manifests
@@ -116,25 +125,68 @@ aws service-quotas get-service-quota \
   --query 'Quota.Value'
 ```
 
-Then apply the cluster prerequisites and continue to [Quick Start](#quick-start):
+### Path A — EKS Auto Mode
+
+[Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html)
+bundles Karpenter and the NVIDIA GPU device plugin, so the cluster satisfies the
+single-node prerequisites with no extra add-ons. The NodePool in
+`k8s-manifest/infra/` targets Auto Mode's built-in `default` NodeClass:
 
 ```bash
+eksctl create cluster --name llm-inference --region us-east-1 --enable-auto-mode
+
+# cluster prerequisites: GPU NodePool + PriorityClass
 kubectl apply -f k8s-manifest/infra/
 ```
 
-> Already have a Karpenter-enabled cluster? Skip this section — just ensure the
-> NodePool in `k8s-manifest/infra/nodepool.yaml` references a NodeClass that
-> exists in your cluster (Auto Mode's is named `default`).
+Then continue to [Quick Start](#quick-start).
+
+### Path B — Terraform
+
+[`infrastructure/terraform/`](infrastructure/terraform) builds a cluster with
+self-managed Karpenter (on Fargate), the NVIDIA GPU Operator, and the AWS EFA
+device plugin — the last of which the multi-node `lws/` examples require:
+
+```bash
+cd infrastructure/terraform
+cp backend.hcl.example backend.hcl          # your S3 state bucket
+cp dev.auto.tfvars.example dev.auto.tfvars  # cluster name, GPU/EFA toggles
+terraform init -backend-config=backend.hcl
+terraform plan -out=planfile
+terraform apply planfile
+$(terraform output -raw configure_kubectl)
+```
+
+This stack creates its own GPU NodePool, so **skip**
+`kubectl apply -f k8s-manifest/infra/nodepool.yaml` and continue to
+[Quick Start](#quick-start). See
+[infrastructure/terraform/README.md](infrastructure/terraform/README.md) for the
+full variable table, teardown, and design notes.
+
+> [!IMPORTANT]
+> Don't mix the two paths — each brings its own GPU NodePool.
+> `k8s-manifest/infra/nodepool.yaml` targets Auto Mode's
+> `eks.amazonaws.com/NodeClass`, which a Terraform-built cluster doesn't serve, so
+> applying it there just leaves a NodePool that never becomes ready. The model
+> manifests themselves work unchanged on either.
 
 ## Prerequisites
 
 - An EKS cluster with [Karpenter](https://karpenter.sh/) and GPU capacity for
   the instance types named in each manifest (`nodeSelector`) — see
-  [Creating a Cluster](#creating-a-cluster) for a from-scratch EKS Auto Mode setup
-- Cluster prerequisites applied:
+  [Creating a Cluster](#creating-a-cluster) to build one from scratch
+- A GPU NodePool and the `PriorityClass`. On Auto Mode (path A) or an existing
+  Karpenter cluster:
 
   ```bash
   kubectl apply -f k8s-manifest/infra/
+  ```
+
+  On a Terraform-built cluster (path B) the NodePool already exists — apply only
+  the PriorityClass:
+
+  ```bash
+  kubectl apply -f k8s-manifest/infra/priority-class.yaml
   ```
 
 - **Multi-node (`lws/`) additionally needs**:
@@ -167,7 +219,7 @@ kubectl apply -f k8s-manifest/infra/
 Deploy GLM-5.2-FP8 on a single `p5en.48xlarge` (Karpenter provisions the node):
 
 ```bash
-# cluster prerequisites
+# cluster prerequisites (Terraform path: priority-class.yaml only — see Prerequisites)
 kubectl apply -f k8s-manifest/infra/
 
 # deploy the model
@@ -224,7 +276,7 @@ Condensed from the benchmark writeups — details in [docs/](docs/):
 ## Cleanup
 
 Delete what you deployed; Karpenter consolidates the empty GPU nodes
-automatically (see `disruption` in `k8s-manifest/infra/nodepool.yaml`):
+automatically (see `disruption` in your GPU NodePool):
 
 ```bash
 # the model(s) you deployed
@@ -237,12 +289,22 @@ kubectl delete -f k8s-manifest/addons/open-webui.yaml
 
 # verify no GPU nodes remain (may take a few minutes to consolidate)
 kubectl get nodeclaims
-kubectl get nodes -l karpenter.sh/nodepool=gpu-nodepool
+kubectl get nodes -o custom-columns='NAME:.metadata.name,POOL:.metadata.labels.karpenter\.sh/nodepool,GPU:.status.allocatable.nvidia\.com/gpu'
 ```
 
 If you created an ECR repository for the EFA images or an S3/FSx model cache,
 remove those separately. Nodes reserved via Capacity Blocks/ODCR bill per the
 reservation regardless of usage — release or let them expire.
+
+To tear down the cluster itself:
+
+```bash
+# path A (Auto Mode)
+eksctl delete cluster --name llm-inference --region us-east-1
+
+# path B (Terraform) — ordered destroy, not a bare `terraform destroy`
+cd infrastructure/terraform && ./cleanup.sh
+```
 
 ## Contributing
 

@@ -1,0 +1,14 @@
+# Copy to dev.auto.tfvars (git-ignored) — Terraform loads *.auto.tfvars
+# automatically. See the variable table in README.md for every input.
+aws_profile     = "default"
+region          = "us-west-2"
+cluster_name    = "llm-inference"
+cluster_version = "1.35"
+
+# GPU serving prerequisites — both needed for the k8s-manifest/ examples
+enable_gpu_operator          = true
+enable_aws_efa_device_plugin = true
+
+# On-Demand Capacity Reservation / Capacity Block (opt-in)
+enable_capacity_reservation = false
+# capacity_reservation_id   = "cr-xxxxxxxxxxxxxxxxx"

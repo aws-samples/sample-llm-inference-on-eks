@@ -1,0 +1,38 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: reserved-capacity-pool
+spec:
+  weight: 10
+  template:
+    metadata:
+      labels:
+        nvidia.com/gpu.present: "true"
+    spec:
+      expireAfter: 720h
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: reserved-capacity
+      taints:
+      - key: nvidia.com/gpu
+        value: "true"
+        effect: "NoSchedule"
+      requirements:
+      - key: "karpenter.sh/capacity-type"
+        operator: In
+        values: [ "reserved", "on-demand" ]
+      - key: "karpenter.k8s.aws/instance-family"
+        operator: In
+        values: [ "p4", "p4d", "p4de", "p5", "p5en", "p6-b200", "p6-b300" ]
+      - key: "kubernetes.io/arch"
+        operator: In
+        values: [ "amd64" ]
+      - key: "karpenter.k8s.aws/instance-hypervisor"
+        operator: In
+        values: [ "nitro" ]
+  limits:
+    cpu: 5000
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 300s

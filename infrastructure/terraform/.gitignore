@@ -1,0 +1,13 @@
+# Terraform working files — never commit these.
+# .terraform.lock.hcl IS tracked on purpose (reproducible provider versions).
+.terraform/
+*.tfstate
+*.tfstate.*
+planfile
+*.tfplan
+crash.log
+
+# Real values live here; the tracked *.example files are the templates.
+backend.hcl
+*.tfvars
+!*.tfvars.example

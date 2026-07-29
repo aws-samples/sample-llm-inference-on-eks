@@ -1,0 +1,36 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  # Deliberately NOT "gpu-nodepool": that name belongs to
+  # k8s-manifest/infra/nodepool.yaml (the EKS Auto Mode path), which references a
+  # different NodeClass. Same-named NodePools would clobber each other.
+  name: gpu
+spec:
+  disruption:
+    budgets:
+    - nodes: 10%
+    consolidateAfter: 300s
+    consolidationPolicy: WhenEmpty
+  limits:
+    cpu: 5000
+  template:
+    spec:
+      expireAfter: 720h
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      taints:
+      - key: nvidia.com/gpu
+        value: "true"
+        effect: "NoSchedule"
+      requirements:
+      - key: "karpenter.k8s.aws/instance-family"
+        operator: In
+        values: [ "g6", "g6e", "g7e", "p4", "p4d", "p4de", "p5", "p5en", "p6-b200", "p6-b300" ]
+      - key: "kubernetes.io/arch"
+        operator: In
+        values: [ "amd64" ]
+      - key: "karpenter.sh/capacity-type"
+        operator: In
+        values: [ "spot", "on-demand" ]

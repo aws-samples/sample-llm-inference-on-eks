@@ -1,0 +1,40 @@
+# Helm Values: https://github.com/NVIDIA/gpu-operator/blob/main/deployments/gpu-operator/values.yaml
+#
+# The GPU nodes run the EKS-optimized AL2023 NVIDIA AMI (see
+# kubernetes/karpenter/node-classes/gpu.yaml), which already ships the NVIDIA
+# driver and nvidia-container-toolkit. The Operator therefore only provides the
+# upper layer: device plugin + feature discovery.
+driver:
+  # Containerized driver is skipped: it must match the host kernel, and it
+  # collides with the driver baked into the NVIDIA AMI.
+  enabled: false
+
+toolkit:
+  # nvidia-container-toolkit is preinstalled in the AMI
+  enabled: false
+
+devicePlugin:
+  enabled: true
+
+gfd:
+  # GPU Feature Discovery — labels nodes with nvidia.com/gpu.product,
+  # nvidia.com/gpu.memory etc. for model-specific scheduling
+  enabled: true
+
+dcgm:
+  enabled: false
+
+dcgmExporter:
+  enabled: false
+
+migManager:
+  enabled: false
+
+gds:
+  enabled: false
+
+vgpuManager:
+  enabled: false
+
+vgpuDeviceManager:
+  enabled: false

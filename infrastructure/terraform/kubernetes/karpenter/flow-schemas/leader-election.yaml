@@ -1,0 +1,27 @@
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: karpenter-leader-election
+spec:
+  distinguisherMethod:
+    type: ByUser
+  matchingPrecedence: 200
+  priorityLevelConfiguration:
+    name: leader-election
+  rules:
+  - resourceRules:
+    - apiGroups:
+      - coordination.k8s.io
+      namespaces:
+      - '*'
+      resources:
+      - leases
+      verbs:
+      - get
+      - create
+      - update
+    subjects:
+    - kind: ServiceAccount
+      serviceAccount:
+        name: karpenter
+        namespace: ${karpenter_namespace}
