@@ -48,6 +48,20 @@ KV-cache offload & externalization (HiCache / LMCache / Redis L2) measured in
 | Distill-Qwen-32B, SGLang | `sglang/ds-r1-distill-qwen-32b-sglang.yaml` | g6e.12xlarge | 📦 |
 | Distill-Qwen-32B, vLLM | `vllm/ds-r1-distill-qwen-32b-vllm.yaml` | g6e.12xlarge | 📦 |
 
+## Kimi-K3 (`moonshotai/Kimi-K3`, 2.8T MXFP4 MoE)
+
+Args follow the official recipe's B300 profile
+([recipes.vllm.ai](https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=b300)).
+Pre-release: requires the `vllm/vllm-openai:kimi-k3` image (vLLM ≥ 0.27.0
+nightly), the one manifest here not pinned to an immutable tag.
+
+Deployed and benchmarked 2026-07-29 — measured performance in
+[English](KIMI-K3-B300-PERFORMANCE.md) / [中文](KIMI-K3-B300-PERFORMANCE-zh.md).
+
+| Shape | Manifest | Instances | Status |
+|---|---|---|---|
+| 1-node TP8, vLLM | `vllm/kimi-k3-p6-b300-vllm.yaml` | 1× p6-b300.48xlarge | ✅ |
+
 ## Qwen
 
 | Model | Manifest | Instances | Status |

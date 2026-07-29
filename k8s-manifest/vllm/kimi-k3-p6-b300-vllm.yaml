@@ -1,0 +1,163 @@
+# Kimi-K3 (2.8T MXFP4 MoE) on vLLM, single p6-b300.48xlarge (8x B300 268GB).
+# Engine args follow the official vLLM recipe's *b300* profile verbatim
+# (https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=b300 -> single_node_tp):
+# TP8, MXFP4 weights, fp8 KV cache, 1M context, TRTLLM_RAGGED MLA prefill.
+#
+# Sizing: recipe estimates ~1680 GB VRAM for the MXFP4 variant vs 2149 GiB on
+# the node, so weights fit in one node at TP8 (~210 GB/GPU) leaving ~45 GB/GPU
+# for KV + activations at gpu-memory-utilization=0.95.
+#
+# The HF repo is public/ungated (~1.56 TB across 120 files) — no HF token needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kimi-k3-vllm
+  labels:
+    app: kimi-k3-vllm
+    engine: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kimi-k3-vllm
+      engine: vllm
+  template:
+    metadata:
+      labels:
+        app: kimi-k3-vllm
+        model: kimi-k3
+        engine: vllm
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p6-b300.48xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: kimi
+        # Pre-release model: the recipe mandates this purpose-built tag (vLLM
+        # >= 0.27.0 nightly with the K3 integration). Unlike the other manifests
+        # here this is NOT an immutable version pin — repin to a dated nightly
+        # once the K3 support lands in a tagged vLLM release.
+        image: vllm/vllm-openai:kimi-k3
+        imagePullPolicy: IfNotPresent
+        command: [ "vllm", "serve" ]
+        args:
+        - moonshotai/Kimi-K3
+        - --host=0.0.0.0
+        - --port=8000
+        - --trust-remote-code
+        # fastsafetensors: direct-to-GPU weight loading, matters at 1.56 TB
+        - --load-format=fastsafetensors
+        # 'auto' picks the Blackwell MXFP4 MoE kernel. Note: use
+        # deep_gemm_mega_moe instead if this is ever redeployed as multi-node DEP.
+        - --moe-backend=auto
+        - --gpu-memory-utilization=0.95
+        - --tensor-parallel-size=8
+        # full 1M context per the b300 recipe. If the engine fails KV-cache
+        # allocation at startup, lower this (131072 is the cap used by the
+        # GLM-5.2 manifests here) rather than dropping gpu-memory-utilization.
+        - --max-model-len=1048576
+        - --kv-cache-dtype=fp8
+        # TRTLLM_RAGGED MLA prefill; use_prefill_query_quantization is required
+        # by the recipe whenever kv-cache-dtype is fp8
+        - --attention-config={"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}
+        - --enable-prefix-caching
+        # thinking / tool-call parsing. Recipe warns K3 occasionally emits a
+        # tool-call shape its own parser rejects — validate + retry client-side.
+        - --enable-auto-tool-choice
+        - --tool-call-parser=kimi_k3
+        - --reasoning-parser=kimi_k3
+        - --served-model-name=moonshotai/Kimi-K3
+        env:
+        # --- all five are from the recipe's b300 (blackwell) profile ---
+        - name: VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION
+          value: "1"
+        - name: VLLM_ALLREDUCE_USE_FLASHINFER
+          value: "1"
+        # 1.56 TB load can easily exceed the default engine-ready deadline
+        - name: VLLM_ENGINE_READY_TIMEOUT_S
+          value: "3600"
+        # Model Runner v2 + Rust frontend. Recipe's notes call these optional
+        # ("can be enabled if needed") but its b300 profile ships them on;
+        # drop both first if you hit engine-startup weirdness.
+        - name: VLLM_USE_V2_MODEL_RUNNER
+          value: "1"
+        - name: VLLM_USE_RUST_FRONTEND
+          value: "1"
+        - name: NCCL_DEBUG
+          value: "INFO"
+        # single-node TP8 stays on NVLink — no EFA/RDMA path here
+        - name: NCCL_P2P_LEVEL
+          value: "NVL"
+        - name: NCCL_NVLS_ENABLE
+          value: "1"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "160"
+            # node has 4 TiB; leave headroom for kubelet/system. Must also cover
+            # the 500Gi /dev/shm emptyDir below (medium: Memory counts here).
+            memory: 3072Gi
+            ephemeral-storage: 300Gi
+            nvidia.com/gpu: "8"
+        # first start downloads ~1.56 TB of weights — allow up to 150 min
+        # (2x the GLM-5.2 budget, which covers 756 GB in 90 min)
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 180
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 300
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 60
+          timeoutSeconds: 30
+          failureThreshold: 5
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      # node-local NVMe (8x instance-store RAID, ~30 TB) — 1.56 TB of weights
+      # survives pod restarts as long as the pod lands on the same node
+      - name: cache-volume
+        hostPath:
+          path: /mnt/k8s-disks/0/models/kimi
+          type: DirectoryOrCreate
+      # replaces the recipe's docker --ipc=host; TP8 workers talk over shm
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "500Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kimi-k3-vllm
+spec:
+  selector:
+    app: kimi-k3-vllm
+    engine: vllm
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP
