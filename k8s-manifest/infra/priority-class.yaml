@@ -5,4 +5,4 @@ metadata:
   name: high-priority-100
 value: 100
 globalDefault: false
-description: "High priority class for DeepSeek deployment"
+description: "High priority class for model serving deployments"
