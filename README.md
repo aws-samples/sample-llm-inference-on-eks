@@ -13,9 +13,9 @@ instances — from single-GPU deployments to multi-node tensor parallelism over
 [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) and
 prefill/decode disaggregation.
 
-Models covered include **GLM-5.2** (753B MoE), **DeepSeek-R1 / V3.2**, the R1
-distills, **Qwen**, **gpt-oss**, and **Llama 4** — see
-[docs/MODEL-INDEX.md](docs/MODEL-INDEX.md) for the by-model view of every
+Models covered include **Kimi-K3** (2.8T MXFP4 MoE), **GLM-5.2** (753B MoE),
+**DeepSeek-R1 / V3.2**, the R1 distills, **Qwen**, **gpt-oss**, and **Llama 4**
+— see [docs/MODEL-INDEX.md](docs/MODEL-INDEX.md) for the by-model view of every
 manifest with instance types and maintenance status.
 
 > [!WARNING]
