@@ -106,6 +106,7 @@ pick **one** of two paths — they are mutually exclusive (see the note below):
 | Karpenter | bundled, AWS-managed | self-managed on Fargate, you control the version |
 | GPU device plugin | bundled | NVIDIA GPU Operator |
 | EFA device plugin | **not included** — install it yourself | included (`enable_aws_efa_device_plugin`) |
+| LWS controller | **not included** — install it yourself | included (`enable_lws`) |
 | Networking | defaults | VPC + S3/ECR endpoints (no NAT cost for image pulls) |
 | Good for | trying the single-node examples fast | multi-node `lws/` examples, or reusing the stack |
 
@@ -145,7 +146,8 @@ Then continue to [Quick Start](#quick-start).
 
 [`infrastructure/terraform/`](infrastructure/terraform) builds a cluster with
 self-managed Karpenter (on Fargate), the NVIDIA GPU Operator, and the AWS EFA
-device plugin — the last of which the multi-node `lws/` examples require:
+device plugin plus LeaderWorkerSet controller — the last two being what the
+multi-node `lws/` examples require:
 
 ```bash
 cd infrastructure/terraform
@@ -190,8 +192,10 @@ full variable table, teardown, and design notes.
   ```
 
 - **Multi-node (`lws/`) additionally needs**:
-  - [LeaderWorkerSet](https://github.com/kubernetes-sigs/lws) controller
-  - EFA device plugin (`aws-efa-k8s-device-plugin`) on the GPU nodes
+  - [LeaderWorkerSet](https://github.com/kubernetes-sigs/lws) controller — path B
+    installs it (`enable_lws`)
+  - EFA device plugin (`aws-efa-k8s-device-plugin`) on the GPU nodes — path B
+    installs it too (`enable_aws_efa_device_plugin`)
   - An EFA-enabled image — build from `k8s-manifest/lws/Dockerfile.efa-*` and
     push to your registry (see [k8s-manifest/lws/README.md](k8s-manifest/lws/README.md)).
     Manifests reference images as `<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/...`

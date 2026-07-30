@@ -15,6 +15,10 @@ else
   # load balancers it created. Best-effort — off by default in addons.tf.
   kubectl delete ingress --all --all-namespaces --ignore-not-found || true
 
+  # LeaderWorkerSets before the NodePools: the controller recreates their pods,
+  # so leaving them up just means Pending pods once the nodes are gone.
+  kubectl delete leaderworkersets --all --all-namespaces --ignore-not-found || true
+
   # Deleting the NodePools drains and terminates every Karpenter node. Without
   # this the EKS destroy blocks on nodes it doesn't own.
   kubectl delete nodepool --all --ignore-not-found || true

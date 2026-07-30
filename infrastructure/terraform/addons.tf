@@ -112,6 +112,33 @@ resource "helm_release" "nvidia_gpu_operator" {
   depends_on = [kubectl_manifest.karpenter_node_pool]
 }
 
+resource "helm_release" "lws" {
+  count = var.enable_lws ? 1 : 0
+  name  = "lws"
+  # https://github.com/kubernetes-sigs/lws/tree/main/charts/lws
+  # OCI: the provider joins repository + "/" + chart, so the chart name is not
+  # part of the repository path (same shape as the karpenter releases)
+  repository       = "oci://registry.k8s.io/lws/charts"
+  chart            = "lws"
+  version          = "v0.9.0"
+  namespace        = "lws-system"
+  create_namespace = true
+  wait             = true
+
+  # Chart defaults are used as-is: internal cert management (no cert-manager in
+  # this stack), enablePrometheus off (the kube-prometheus-stack CRDs its
+  # ServiceMonitor needs aren't installed), no tolerations so the controller
+  # lands on the `default` NodePool rather than a tainted GPU node.
+
+  # Same constraint as the GPU Operator: the controller-manager requests 1 CPU /
+  # 1Gi and there is no Fargate profile for lws-system, so it needs a real node,
+  # which only exists once Karpenter can provision one. Its webhooks also have
+  # failurePolicy=Fail, but both are scoped to leaderworkersets and to pods
+  # carrying the leaderworkerset.sigs.k8s.io/name label, so an unready webhook
+  # can't deadlock the rest of the cluster the way the ALB one does.
+  depends_on = [kubectl_manifest.karpenter_node_pool]
+}
+
 resource "helm_release" "aws_efa_device_plugin" {
   count = var.enable_aws_efa_device_plugin ? 1 : 0
   name  = "aws-efa-k8s-device-plugin"

@@ -24,12 +24,12 @@ with zero EC2 nodes; every worker node is provisioned on demand by Karpenter.
 | File | Contents |
 |---|---|
 | `main.tf` | Terraform/provider versions, S3 backend, AWS/kubernetes/kubectl/helm providers, shared `data` + `locals` |
-| `variables.tf` | Inputs — region, VPC CIDR, cluster name/version, GPU & EFA toggles, ODCR flags |
+| `variables.tf` | Inputs — region, VPC CIDR, cluster name/version, GPU / EFA / LWS toggles, ODCR flags |
 | `vpc.tf` | VPC (`10.6.0.0/16`, 4 AZs, single NAT), Karpenter + CNI discovery tags on private subnets |
 | `vpc-endpoint.tf` | S3 Gateway endpoint + ECR API/DKR Interface endpoints + endpoint SG |
 | `eks.tf` | EKS module v21, Fargate profiles, core EKS add-ons, `gp3` default StorageClass |
 | `karpenter.tf` | Karpenter module + Helm releases, EC2NodeClasses / NodePools / FlowSchemas |
-| `addons.tf` | `eks-blueprints-addons` (EBS CSI, metrics-server, node monitoring agent), Pod Identity associations, NVIDIA GPU Operator, AWS EFA device plugin |
+| `addons.tf` | `eks-blueprints-addons` (EBS CSI, metrics-server, node monitoring agent), Pod Identity associations, NVIDIA GPU Operator, AWS EFA device plugin, LeaderWorkerSet controller |
 | `kubernetes/` | Helm value overrides and raw manifests consumed by the above |
 | `cleanup.sh` | Ordered `terraform destroy` (nodes → add-ons → EKS → everything else) + orphaned ELB SG cleanup |
 
@@ -80,6 +80,7 @@ Installed by default:
 - **EKS Pod Identity** associations for `ebs-csi-controller-sa` and the CloudWatch agent
 - **NVIDIA GPU Operator** `v26.3.0` — gated by `enable_gpu_operator`. Driver and `nvidia-container-toolkit` are **disabled** because the AL2023 NVIDIA AMI ships them; the Operator only provides the device plugin + GPU Feature Discovery. It depends on `kubectl_manifest.karpenter_node_pool` because its pods need a real (non-Fargate) node.
 - **AWS EFA device plugin** `v0.5.30` — gated by `enable_aws_efa_device_plugin`, required by the multi-node [`lws/`](../../k8s-manifest/lws) examples. No affinity override: the chart's own `supportedInstanceLabels` already enumerates every EFA-capable instance type.
+- **LeaderWorkerSet (LWS)** `v0.9.0` — gated by `enable_lws` (**on** by default). Installs the `LeaderWorkerSet` CRD + controller into `lws-system` from `oci://registry.k8s.io/lws/charts`; this is the controller the multi-node [`lws/`](../../k8s-manifest/lws) examples need, so a cluster built here can apply them directly. Chart defaults are kept: internal cert management (no cert-manager in this stack), `enablePrometheus=false`, and no tolerations, so the controller lands on the `default` NodePool instead of a tainted GPU node. Like the GPU Operator it depends on `kubectl_manifest.karpenter_node_pool` — the controller requests 1 CPU / 1Gi and there is no Fargate profile for `lws-system`.
 
 Wired but **off** (flip the flag in `addons.tf` to enable):
 
@@ -132,6 +133,7 @@ cp dev.auto.tfvars.example dev.auto.tfvars   # git-ignored
 | `cluster_version` | `1.35` | Kubernetes version |
 | `enable_gpu_operator` | `false` | Install the NVIDIA GPU Operator — **set `true` for GPU serving** |
 | `enable_aws_efa_device_plugin` | `false` | Install the AWS EFA device plugin — **set `true` for the multi-node `lws/` examples** |
+| `enable_lws` | `true` | Install the LeaderWorkerSet controller (needed by the multi-node `lws/` examples) |
 | `enable_capacity_reservation` | `false` | Provision the ODCR NodeClass + NodePool |
 | `capacity_reservation_id` | `null` | Required when `enable_capacity_reservation = true` |
 | `slack_api_url` | placeholder | Alertmanager Slack webhook (only used when kube-prometheus-stack is enabled) |
@@ -158,6 +160,7 @@ kubectl get nodepools                          # default, gpu
 kubectl get pods -n karpenter                  # Running, on Fargate
 kubectl get pods -n gpu-operator               # device plugin + GFD
 kubectl get ds -n kube-system aws-efa-k8s-device-plugin
+kubectl get deploy -n lws-system lws-controller-manager   # multi-node lws/ examples
 ```
 
 Note that `gpu-operator` pods stay Pending until the first GPU node exists —
@@ -238,6 +241,10 @@ kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable
 kubectl get pods -n gpu-operator
 kubectl get ds -n kube-system aws-efa-k8s-device-plugin
 
+# LeaderWorkerSet
+kubectl get deploy -n lws-system lws-controller-manager
+kubectl get leaderworkersets -A
+
 # Check an ODCR before enabling it
 aws ec2 describe-capacity-reservations --capacity-reservation-ids cr-xxxxxxxxxxxxxxxxx
 ```
@@ -249,9 +256,10 @@ AWS_PROFILE=<profile> ./cleanup.sh
 ```
 
 Order matters, which is why this isn't a bare `terraform destroy`: the script
-deletes Karpenter NodePools (so nodes drain first) and cluster Ingresses,
-destroys `module.eks_blueprints_addons` then `module.eks`, deletes
-ELB-controller-created security groups left behind, then destroys the remainder.
+deletes cluster Ingresses, any LeaderWorkerSets, and the Karpenter NodePools (so
+nodes drain first), destroys `module.eks_blueprints_addons` then `module.eks`,
+deletes ELB-controller-created security groups left behind, then destroys the
+remainder.
 Delete your model workloads first so nothing blocks the drain.
 
 ## Gotchas

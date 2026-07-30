@@ -18,7 +18,8 @@ PD architecture deep-dive: [PD_DISAGGREGATION.md](../../docs/PD_DISAGGREGATION.m
 
 - EKS cluster with p5/p5en capacity (manifests pin
   `node.kubernetes.io/instance-type` per file)
-- LWS controller installed
+- LWS controller installed (already included if you built the cluster with
+  [`infrastructure/terraform/`](../../infrastructure/terraform) — `enable_lws`)
 - EFA device plugin (`aws-efa-k8s-device-plugin`) — pods request
   `vpc.amazonaws.com/efa: 16`
 - An EFA-enabled SGLang image in your registry (below)
