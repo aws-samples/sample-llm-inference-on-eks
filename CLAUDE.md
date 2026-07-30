@@ -70,3 +70,8 @@ architectural invariants.
   20–40 min, restarts on the same node are fast
 - Benchmark workflow, tool-version gotchas, and thinking-model pitfalls:
   `docs/benchmark-commands.md` and `docs/GLM-5.2-BENCHMARK.md`
+- Writing or editing a benchmark report → follow
+  `docs/BENCHMARK-REPORTING-PRINCIPLES.md`: separate observed fact / inference /
+  hypothesis, no causal attribution without a controlled A/B or profiling
+  evidence, scope every conclusion to what was actually tested, and prefer
+  "insufficient evidence" over a completed story

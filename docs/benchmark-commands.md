@@ -193,3 +193,8 @@ vllm bench serve \
 
 Full workflow (client pod setup, thinking-mode pitfalls, metric interpretation):
 see [GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md) → Reproduce.
+
+Before writing up results, read
+[BENCHMARK-REPORTING-PRINCIPLES.md](BENCHMARK-REPORTING-PRINCIPLES.md) — the rules
+this repo's reports are held to (evidence boundaries, metric definitions, scope
+limits, honest reporting of discarded runs).
