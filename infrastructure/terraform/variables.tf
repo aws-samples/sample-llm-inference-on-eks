@@ -47,6 +47,12 @@ variable "enable_aws_efa_device_plugin" {
   description = "Whether to enable the AWS EFA Device Plugin"
 }
 
+variable "enable_lws" {
+  type        = bool
+  default     = true
+  description = "Whether to install the LeaderWorkerSet (LWS) controller, required by the multi-node k8s-manifest/lws examples"
+}
+
 variable "enable_capacity_reservation" {
   type        = bool
   default     = false

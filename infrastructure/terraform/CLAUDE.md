@@ -27,7 +27,7 @@ worker node is provisioned by Karpenter.
 - `vpc-endpoint.tf` — S3 Gateway + ECR API/DKR Interface endpoints + endpoint SG
 - `eks.tf` — EKS module, Fargate profiles, core managed add-ons, `gp3` default StorageClass, outputs
 - `karpenter.tf` — Karpenter module + Helm releases, manifest loaders for `kubernetes/karpenter/{node-classes,node-pools,flow-schemas}/`
-- `addons.tf` — `eks-blueprints-addons`, Pod Identity associations, GPU Operator, EFA device plugin
+- `addons.tf` — `eks-blueprints-addons`, Pod Identity associations, GPU Operator, EFA device plugin, LWS controller
 - `kubernetes/` — Helm value **overrides** (merged onto upstream chart defaults, not full copies) and raw manifests consumed by the above
 - `cleanup.sh` — ordered destroy + cleanup of ELB-controller-created security groups
 
@@ -41,6 +41,7 @@ worker node is provisioned by Karpenter.
 - **`amiSelectorTerms: alias: al2023@latest`** in every EC2NodeClass. The alias expands to all AL2023 variants with their arch/GPU-count requirements, so GPU instance types resolve to the NVIDIA variant on their own. Don't hand-pin GPU AMIs.
 - **GPU Operator runs with `driver.enabled=false` and `toolkit.enabled=false`** — the AL2023 NVIDIA AMI already ships both, and a containerized driver collides with the baked-in one. The Operator only provides the device plugin + feature discovery.
 - **GPU Operator depends on `kubectl_manifest.karpenter_node_pool`.** Its pods need a real (non-Fargate) node, which only exists once Karpenter can provision one; installing earlier makes `wait = true` time out and marks the release failed.
+- **LWS depends on `kubectl_manifest.karpenter_node_pool`, same as the GPU Operator.** Its controller-manager requests 1 CPU / 1Gi and there is no Fargate profile for `lws-system`, so `wait = true` times out without a Karpenter-provisioned node. It runs with chart defaults — internal cert management (no cert-manager in this stack), `enablePrometheus=false` (the ServiceMonitor CRD isn't installed), and no tolerations so it stays off tainted GPU nodes. `enable_lws` defaults to `true` because the `k8s-manifest/lws/` examples don't work without it.
 - **EFA device plugin gets no affinity override.** The chart's own `supportedInstanceLabels` tracks every EFA-capable instance type; a hand-maintained subset silently omits new families and wrongly includes small GPU sizes that have no EFA.
 - **VPC endpoints are intentional** (S3 Gateway + ECR Interface) so private-subnet pods don't pay NAT egress for image pulls and S3.
 - **Extra AZ beyond the usual three** — the newest GPU on-demand capacity is often only available in the fourth AZ. Public subnet CIDRs are offset to stay clear of the wider private ranges; changing the AZ count means re-checking that offset.
