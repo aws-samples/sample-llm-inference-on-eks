@@ -58,8 +58,13 @@ architectural invariants.
   section current
 - Pin image versions — no `:latest`
 - No hardcoded `namespace:` in manifests — deploy to the current context
-- `privileged: true` only in `lws/` manifests (EFA device access); single-node
-  manifests must not need it
+- `privileged: true` only in `lws/` manifests; single-node manifests must not have
+  it. It is **not** what grants EFA access — measured on TP16/p5en 2026-07-31, the
+  EFA device plugin injects `/dev/infiniband` whenever the pod requests
+  `vpc.amazonaws.com/efa`, and NCCL still selected `efa` with GDRDMA after removing
+  `privileged`, the added capabilities, and the `/dev/infiniband` hostPath. The
+  existing `lws/` manifests keep all three deliberately; do not cite EFA as the
+  reason for them.
 - Old manifests are kept as reference (📦 in `docs/MODEL-INDEX.md`); review
   before applying
 

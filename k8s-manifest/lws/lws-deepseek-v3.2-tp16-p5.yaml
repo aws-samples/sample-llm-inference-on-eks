@@ -104,7 +104,7 @@ spec:
             - name: shm
               mountPath: /dev/shm
           securityContext: &common-security-context
-            privileged: true # required ONLY for EFA device access (/dev/infiniband); single-node manifests do not need this
+            privileged: true # not required for EFA (the device plugin injects the devices when the pod requests vpc.amazonaws.com/efa); kept as-is
             capabilities:
               add:
               - IPC_LOCK
