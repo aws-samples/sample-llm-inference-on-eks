@@ -3,10 +3,11 @@
 # the reserved-capacity-pool provisions both nodes from it.
 #
 # IMAGE PREREQUISITE: GLM-5.2 requires SGLang >= v0.5.13.post1, but the existing
-# EFA images (sglang-efa-p5:v0.5.7/v0.5.10) are too old. Rebuild the EFA image
-# from v0.5.13.post1 before deploying. Fallback: docker.io/lmsysorg/sglang:v0.5.13.post1
-# works WITHOUT the aws-ofi-nccl plugin — NCCL falls back to TCP over eth0 (slow
-# cross-node allreduce; fine for a functional test, not for benchmarking).
+# EFA images (sglang-efa-p5:v0.5.7/v0.5.10) are too old. Build the EFA image from
+# v0.5.13.post1 (Dockerfile.efa-sglang-0513) before deploying. Fallback:
+# docker.io/lmsysorg/sglang:v0.5.13.post1 works WITHOUT the aws-ofi-nccl plugin —
+# NCCL falls back to TCP over eth0 (slow cross-node allreduce; fine for a
+# functional test, not for benchmarking).
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
@@ -30,7 +31,7 @@ spec:
           effect: "NoSchedule"
         containers:
         - name: sglang-leader
-          image: &common-image <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.13.post1-nixl # EFA 1.49 + aws-ofi-nccl + NIXL 0.10.1 (LIBFABRIC backend)
+          image: &common-image <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sglang-efa-p5:v0.5.13.post1-efa # EFA 1.49 + aws-ofi-nccl
           imagePullPolicy: Always
           command: [ "python3", "-m", "sglang.launch_server" ]
           args: &common-args
@@ -128,7 +129,7 @@ spec:
             - name: shm
               mountPath: /dev/shm
           securityContext: &common-security-context
-            privileged: true # required ONLY for EFA device access (/dev/infiniband); single-node manifests do not need this
+            privileged: true # not required for EFA (the device plugin injects the devices when the pod requests vpc.amazonaws.com/efa); kept as-is
             capabilities:
               add:
               - IPC_LOCK
