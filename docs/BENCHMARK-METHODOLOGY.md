@@ -209,12 +209,14 @@ from the interval.** Each experiment carries an explicit list of boundary timest
 between the boundaries you want to keep, and drop the early windows rather than a time
 slice.
 
-⚠️ **`interval` is not the window width.** In 0.0.16.post1 a window comes out ≈1.2× the
-configured interval — on the L40S rig, 60 s configured produced three 72.0 s windows. So
-`last 3 × interval` covers only ≈2.5 real windows and silently cuts into the one you meant
-to keep. An earlier version of this document told you to slice on `3 × interval`; that was
-wrong, and the "+10–15%" it produced was an artefact of the bad cutoff, not a measurement
-of ramp-up. The figures above are recomputed from the real boundaries.
+⚠️ **`interval` is not the window width — the multiplier is 1.2, hard-coded.** `Measure()`
+sleeps for `config.measurement_window * 1.2` (`inference_profiler.cc:1229-1230`), so a
+window is always 1.2× the value you pass to `--measurement-interval`. Confirmed empirically
+too: 60 s configured produced three 72.0 s windows on the L40S rig. Consequently
+`last 3 × interval` spans only ≈2.5 real windows and silently cuts into the one you meant to
+keep. An earlier version of this document told you to slice on `3 × interval`; that was
+wrong, and the "+10–15%" it produced was an artefact of the bad cutoff, not a measurement of
+ramp-up. The figures above are recomputed from the exported boundaries.
 
 ⚠️ **`--warmup-request-count` does not hand you a warm queue.** perf_analyzer runs the
 warmup as a separate load phase and then calls `WaitForWarmupAndCleanup()`, which joins every

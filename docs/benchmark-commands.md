@@ -196,7 +196,8 @@ a period shorter than the window averages out inside it.
 > [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 gives the procedure — filter on
 > the `window_boundaries` array in `profile_export.json`, keeping requests whose *last
 > response* falls in the windows you retain. Do **not** slice on `3 × interval`: a window
-> comes out ≈1.2× the configured interval, so that cuts into the windows you meant to keep.
+> is always 1.2× the configured interval (`Measure()` sleeps for `measurement_window * 1.2`,
+> `inference_profiler.cc:1229-1230`), so that cuts into the windows you meant to keep.
 > And do **not** reach for `--request-count` to pin depth — it collapses the run to a single
 > window, which cannot be trimmed at all (Step 2).
 >

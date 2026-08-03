@@ -3,7 +3,7 @@
 **Date**: 2026-07-07 → 07-08
 **Model**: `zai-org/GLM-5.2-FP8` — 753B MoE (DSA sparse attention, 256 experts/top-8, 1 MTP layer), FP8 weights ~756 GB
 **Hardware**: p5en.48xlarge (8× H200 141 GB, 16× EFA), Karpenter `reserved-capacity-pool` (us-west-2d capacity block)
-**Load generator**: NVIDIA genai-perf 0.0.16.post1 (Triton 26.06 SDK pod, in-cluster); `sglang.bench_serving` for PD-router runs and all decode-heavy runs (genai-perf SSE parser fails against the router at concurrency 40). **Measurement volume in the original 07-07/07-08 campaigns was left at genai-perf's defaults, so none of those figures is a steady-state measurement — latency and throughput alike.** Rows marked with a prime (L2′, L3′, P1′) and the tables in Open item 0 are much deeper re-measurements from 2026-07-29→31 and are the ones to prefer — but they are still whole-run averages that include ramp-up, not steady-state values, and their arms do not share a measurement depth. See the warning below and § Traceability and known defects.
+**Load generator**: NVIDIA genai-perf 0.0.16.post1 (Triton 26.06 SDK pod, in-cluster); `sglang.bench_serving` for PD-router runs and all decode-heavy runs (genai-perf SSE parser fails against the router at concurrency 40). **Measurement volume in the original 07-07/07-08 campaigns was left at genai-perf's defaults, so none of those figures is a steady-state measurement — latency and throughput alike.** Rows marked with a prime (L2′, L3′, P1′) and the tables in Open item 0 are much deeper re-measurements from 2026-07-29→31 and are the ones to prefer — but they are still whole-run averages that include ramp-up, not steady-state values, and each is a single run with no variance estimate. See the warning below and § Traceability and known defects.
 
 > [!IMPORTANT]
 > **Reading guide.** This report's *qualitative* findings (crash mechanisms, config
@@ -103,8 +103,8 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 
 | Priority | Recommended shape | Basis |
 |---|---|---|
-| Max throughput per dollar | **Undetermined** | The former pick (2× independent TP8 replicas) was an extrapolation from a shallow single-node number (456 × 2 ≈ 912 tok/s). At the deeper depth TP8 c20 reads 552 tok/s, so the same arithmetic gives ~1,104 — and neither figure has been measured on two replicas. Mixing shallow, steady-state and extrapolated bases in one comparison is not valid; see Open item 1. |
-| Hard TTFT SLO at c20–c40 | **Undetermined** | Deeper runs read TTFT p50 level between the two (869 vs 839 ms at c20; 892 vs 848 ms at c40), c40 tails comparable (p90/p99 1,772 / 3,362 ms TP8 vs 1,644 / 3,291 TP16), and TP16's throughput ~6% lower. But each arm is **n=1 with no variance estimate** and includes ramp-up, so none of those differences is established — including the absence of one. This row previously read "no evidence favours TP16", which overstates what a single unreplicated pair can show. Cost remains a separate, non-measurement argument: TP16 uses twice the hardware. |
+| Max throughput per dollar | **Undetermined** | The former pick (2× independent TP8 replicas) was an extrapolation from a shallow single-node number (456 × 2 ≈ 912 tok/s). At the deeper depth TP8 c20 reads 552 tok/s, so the same arithmetic gives ~1,104 — and neither figure has been measured on two replicas. Mixing shallow, deeper and extrapolated bases in one comparison is not valid; see Open item 1. |
+| Hard TTFT SLO at c20–c40 | **Undetermined** | Deeper runs read TTFT p50 level between the two (869 vs 839 ms at c20; 892 vs 848 ms at c40), c40 tails comparable (p90/p99 1,772 / 3,362 ms TP8 vs 1,644 / 3,291 TP16), and TP16's throughput 5.2% (c20) / 5.6% (c40) lower, relative to TP8. But each arm is **n=1 with no variance estimate** and includes ramp-up, so none of those differences is established — including the absence of one. This row previously read "no evidence favours TP16", which overstates what a single unreplicated pair can show. Cost remains a separate, non-measurement argument: TP16 uses twice the hardware. |
 | Low concurrency / single-node budget | 1-node TP8 (SGLang and vLLM both viable) | The 456 / 454 / 476 tok/s readings are shallow and n=1 with no variance estimate, so they establish neither a "wall" nor a tie between engines. What survives: both engines served this model and workload without crashing at mem 0.80. |
 | Strict ITL SLO (8K/1K) | **Undetermined** | The earlier verdict ("PD's only edge is ITL *variance*, at a 37% ITL-mean cost") was an artefact of 2-requests-per-slot sampling and is withdrawn. Deeper runs happen to read PD's ITL mean below one node's (27.2 vs 34.4 ms at c20) at the cost of TTFT (5,228 vs 869 ms) — but that is **one comparison, n=1, no variance estimate, ramp-up included, c20 only** (c40 is not measurable through the router). No cross-arm claim follows from it, including a directional one: "unlikely to be noise" was asserted here without a variance estimate to support it. |
 | Decode-heavy workloads (1K/4K) | **Undetermined** | The § Decode-heavy workload comparison is internally consistent (same tool, same depth both arms) but both arms are shallow, and shallow measurement is now known to distort PD far more than single-node TP8 (41% vs 4% throughput error at c20 on 8K/1K, relative to the deeper value). Its −32%/−27% throughput gaps have not been re-measured at any greater depth. |
@@ -120,7 +120,7 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 > |---|---|---|---|
 > | c20 total tok/s | 552.2 | 523.6 | 23.3 vs 22.1 |
 > | c20 TTFT p50 | 869 ms | 839 ms | (as above) |
-> | c40 total tok/s | 698.1 | 659.1 | **14.7 vs 11.6 — 27% apart** |
+> | c40 total tok/s | 698.1 | 659.1 | **14.7 vs 11.6 — 21% fewer** |
 > | c40 TTFT p50 | 892 ms | 848 ms | (as above) |
 >
 > Two defects, either one fatal:
@@ -147,8 +147,9 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 > ([BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 2). Resolving it means running
 > each arm at several depths and showing the metric has flattened; see Open item 2.
 >
-> Also unexplained: the depth bias on TP16 changes sign with concurrency (c20 throughput
-> 414 → 524, +27%; c40 739 → 659, −11%). And no NCCL or EFA counters were ever collected,
+> Also unexplained: the depth bias on TP16 changes sign with concurrency — relative to the
+> deeper value, the shallow reading is **21% low** at c20 (414 vs 524) but **12% high** at
+> c40 (739 vs 659). And no NCCL or EFA counters were ever collected,
 > so the "cross-node allreduce tax" remains a hypothesis, not a measured cost.
 
 ## Findings
@@ -170,7 +171,7 @@ No single-variable chunked-prefill sweep was run, so the flat throughput cannot 
 attributed to chunk size. The SGLang↔vLLM comparison spans engine, mem-fraction and
 speculative-decoding config simultaneously.
 
-**On "same number":** 454 / 456 / 476 tok/s spans 4.4%. Each is a single shallow run
+**On "same number":** 454 / 456 / 476 tok/s spans 4.8% (476 ÷ 454). Each is a single shallow run
 with no repeats and no variance estimate, so whether that spread is noise or signal is
 undetermined — it is not evidence of a shared ceiling. The earlier claim that this
 showed "two engines, three schedulers, same number" is withdrawn.
@@ -201,9 +202,9 @@ SGLang's default `max_prefill_tokens=16384` caps the effective chunk. Setting `-
 ### 5. Whether TP16 justifies itself is still unresolved
 
 **No valid TP8-vs-TP16 comparison exists in this report yet.** Deeper re-measurements at
-c20/c40 put TP16 within ~6% of a single TP8 node (523.6 vs 552.2 tok/s at c20; 659.1 vs
-698.1 at c40) while using twice the hardware — but each arm is **a single run with no
-variance estimate**, and neither figure excludes ramp-up, so a 6% gap cannot be read off
+c20/c40 put TP16 within 5–6% of a single TP8 node (523.6 vs 552.2 tok/s at c20, −5.2%;
+659.1 vs 698.1 at c40, −5.6%) while using twice the hardware — but each arm is **a single run with no
+variance estimate**, and neither figure excludes ramp-up, so a 5–6% gap cannot be read off
 them — in either direction. See the box above, and Open item 2 for what a valid run
 requires. What is safe to say is only about the *old* claim: "c40 is where TP16 turns the
 corner" rested on a 2-requests-per-slot reading of 730 tok/s and is unsupported.
@@ -228,10 +229,10 @@ prohibits.
 > [!CAUTION]
 > **Superseded (2026-07-31).** This box previously argued the finding might be
 > *inverted*, on the strength of TP8 reading **1,070 tok/s at c40** against TP16's 730 —
-> one node beating two by 47%. Both figures were 2-requests-per-slot readings. At steady
-> state the pair is 698 (TP8) vs 659 (TP16): the direction of the original finding holds,
-> but the magnitude was an artefact and there is no 47% inversion. Retained here because
-> the retracted claim circulated; the current position is in the Finding 5 box above.
+> one node beating two by 47%. Both figures were 2-requests-per-slot readings. At the deeper
+> depth the pair is 698 (TP8) vs 659 (TP16) — no 47% inversion, and n=1 on both sides so no
+> direction is established either. Retained here because the retracted claim circulated; the
+> current position is in the Finding 5 box above.
 
 > [!CAUTION]
 > **Retracted (2026-07-28):** this finding previously claimed TTFT p90 "collapsed
@@ -477,8 +478,9 @@ each at concurrency 20 (60 prompts) and 40 (120 prompts).
 gaps below: −32%/−27% throughput (c20/c40) on 2× the nodes (≈37% per-node efficiency),
 TTFT 4–5× worse, ITL mean 37–49% slower. Those gaps are **not reliable at this depth** —
 see the box above — and on the 8K/1K workload the analogous shallow finding (PD −32%
-throughput, ITL mean +37%) reversed once measured deeply, with PD reading *higher*
-throughput and *better* ITL than one node. The 1K/4K numbers below have not been
+throughput, ITL mean +37%) did not survive deeper measurement: PD's throughput moved 41%
+while single-node TP8's moved 4%, which is enough to unmake the gap without establishing one
+in the other direction. The 1K/4K numbers below have not been
 re-measured, so nothing here should be cited for or against PD. The **relative**
 numbers below (throughput gaps, ITL means, TTFT ratios) are all subject to the same
 invalidation and none of them should be quoted.
@@ -607,7 +609,7 @@ that previously accompanied this sentence is dropped.)
    the PD nodes and scaling `glm-5-2` to `replicas: 2`.
 2. **TP8-vs-TP16 with uncertainty quantified — still open.** Both shapes were re-measured
    deeply on 2026-07-30/31 (same cluster, same tool, same workload and concurrency, drained
-   between runs) and TP16 came out ~6% behind one node — but each arm is n=1 with no
+   between runs) and TP16 came out 5–6% behind one node — but each arm is n=1 with no
    variance estimate and includes ramp-up, so the gap is not established. A valid run needs:
    **repeat runs per arm with a confidence interval or at least the run-to-run spread**,
    window-boundary trimming to stationary windows (Step 3), **≥4 concurrency points**, and
@@ -677,7 +679,8 @@ further steps are required and were **not** applied to any figure in this report
 
 1. Keep `profile_export.json` and trim using its `window_boundaries` array — drop the
    early windows and keep requests whose *last response* falls inside the ones retained.
-   Do not slice on `3 × interval`: a window is ≈1.2× the configured interval, so that
+   Do not slice on `3 × interval`: a window is always 1.2× the configured interval
+   (`inference_profiler.cc:1229-1230`), so that
    cuts into the windows you meant to keep.
 2. Publish per-window percentiles, not just whole-run ones — percentiles discard request
    order and cannot show whether the queue settled.
