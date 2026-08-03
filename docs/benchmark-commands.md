@@ -178,9 +178,26 @@ is smaller, prompts get reused, prefix-cache hit rate climbs mid-run, and TTFT
 drifts downward — a self-inflicted trend.
 
 The stability check compares whole windows against each other, so fluctuation with
-a period shorter than the window averages out inside it. Report **p50, p90 and p99**
-together rather than a single number. A p50 that improves as concurrency rises is a
-methodology red flag, not a result.
+a period shorter than the window averages out inside it.
+
+> [!CAUTION]
+> **The numbers genai-perf prints at the end of a stability-detected run still include
+> every ramp-up window.** `--stability-percentage` decides when perf_analyzer *stops*, not
+> what gets reported: it collects all windows, and GenAI-Perf then aggregates **all**
+> requests in the export. Measured on the L40S rig, trimming to the last three windows
+> raises TTFT p50 by 10–15%, so the printed summary is **biased low on latency**.
+>
+> **Do not publish the tool's summary as a steady-state result.** Trim it first:
+> [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 gives the procedure (keep
+> requests whose *last response* lands in the final `3 × interval`, from
+> `profile_export.json`). And do **not** reach for `--request-count` to pin depth — it
+> collapses the run to a single window, which cannot be trimmed at all (Step 2).
+
+When you report, give the **full TTFT distribution** (p1…max) for the trimmed subset, plus
+the interval, the observed `Request Count` ÷ concurrency, and **per-window percentiles** —
+percentiles over the whole run cannot show whether the queue had settled, because they
+discard request order. A p50 that improves as concurrency rises is a methodology red flag,
+not a result.
 
 ---
 

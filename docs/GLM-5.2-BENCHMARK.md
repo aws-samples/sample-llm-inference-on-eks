@@ -86,7 +86,7 @@ methodology's Step 2 exists to enforce. R4's deep counterpart is in Open item 0.
 | L2′ | **L2 re-measured deeply** (2026-07-30, 22.1 req/slot, whole-run avg) | (same shape) | 20 | 839 ms | 901 / 1,638 ms | 36.6 ms | 27.8 | 523.6 | ✅ |
 | L3′ | **L3 re-measured deeply** (2026-07-30, 11.6 req/slot, whole-run avg) | (same shape) | 40 | 848 ms | 1,644 / 3,291 ms | 57.2 ms | 17.9 | 659.1 | ✅ |
 | P1 | 2-node PD 1P+1D NIXL | both TP8, mem 0.85 | 20 | 11,560 ms | 35,258 / 38,412 ms | 25.0 ms | 40.5 | 356 | ✅ |
-| P1′ | **P1 re-measured deeply** (2026-07-31, 25.4 req/slot, whole-run avg) | (same shape) | 20 | 5,228 ms | 7,695 / 19,561 ms | 27.2 ms | 36.7 | 602.6 | ✅ plateau |
+| P1′ | **P1 re-measured deeply** (2026-07-31, 25.4 req/slot, whole-run avg) | (same shape) | 20 | 5,228 ms | 7,695 / 19,561 ms | 27.2 ms | 36.7 | 602.6 | ✅ |
 | P2 | 2-node PD 1P+1D NIXL | (same, **`bench_serving` — not comparable to the rows above**) | 40 | 17,246 ms (median) | — / 53,122 ms | 31.7 ms | ~31 | 712 | ✅ |
 
 The last column was previously headed *Stable*, which implied a stability criterion
@@ -103,11 +103,11 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 
 | Priority | Recommended shape | Basis |
 |---|---|---|
-| Max throughput per dollar | **Undetermined** | The former pick (2× independent TP8 replicas) was an extrapolation from a shallow single-node number (456 × 2 ≈ 912 tok/s). At steady state TP8 c20 reads 552 tok/s, so the same arithmetic gives ~1,104 — and neither figure has been measured on two replicas. Mixing shallow, steady-state and extrapolated bases in one comparison is not valid; see Open item 1. |
+| Max throughput per dollar | **Undetermined** | The former pick (2× independent TP8 replicas) was an extrapolation from a shallow single-node number (456 × 2 ≈ 912 tok/s). At the deeper depth TP8 c20 reads 552 tok/s, so the same arithmetic gives ~1,104 — and neither figure has been measured on two replicas. Mixing shallow, steady-state and extrapolated bases in one comparison is not valid; see Open item 1. |
 | Hard TTFT SLO at c20–c40 | **Undetermined, but no evidence favours TP16** | Deeper runs put TTFT p50 level between the two (869 vs 839 ms at c20; 892 vs 848 ms at c40) with c40 tails within noise (p90/p99 1,772 / 3,362 ms TP8 vs 1,644 / 3,291 TP16), and TP16's throughput ~6% lower on twice the hardware. But the two arms ran at different measurement depths (14.7 vs 11.6 req/slot at c40) and neither excludes ramp-up, so none of those gaps is established. What is clear is that nothing here justifies the second node; see the Finding 5 box and Open item 2. |
 | Low concurrency / single-node budget | 1-node TP8 (SGLang and vLLM both viable) | The 456 / 454 / 476 tok/s readings are shallow and n=1 with no variance estimate, so they establish neither a "wall" nor a tie between engines. What survives: both engines served this model and workload without crashing at mem 0.80. |
 | Strict ITL SLO (8K/1K) | **PD 1P+1D looks favourable, but on one unmatched pair** | The earlier verdict ("ITL variance only, at a 37% ITL-mean cost") was an artefact of 2-requests-per-slot sampling and is withdrawn. Deeper runs put PD's ITL mean *below* one node's (27.2 vs 34.4 ms at c20) with ITL p99 28.2 / max 28.3 ms — nearly flat — at the cost of TTFT (5,228 vs 869 ms). Caveats: c20 only (c40 is not measurable through the router), depths 25.4 vs 23.3 req/slot rather than pinned, and neither figure excludes ramp-up. Directionally the ITL advantage is large enough to be unlikely to be noise; treat the magnitudes as provisional. |
-| Decode-heavy workloads (1K/4K) | **Undetermined** | The § Decode-heavy workload comparison is internally consistent (same tool, same depth both arms) but both arms are shallow, and shallow measurement is now known to distort PD far more than single-node TP8 (41% vs 4% throughput error at c20 on 8K/1K, relative to the deeper value). Its −32%/−27% throughput gaps have not been re-measured at steady state. |
+| Decode-heavy workloads (1K/4K) | **Undetermined** | The § Decode-heavy workload comparison is internally consistent (same tool, same depth both arms) but both arms are shallow, and shallow measurement is now known to distort PD far more than single-node TP8 (41% vs 4% throughput error at c20 on 8K/1K, relative to the deeper value). Its −32%/−27% throughput gaps have not been re-measured at any greater depth. |
 
 > [!IMPORTANT]
 > **Finding 5 (TP8 vs TP16) is still unresolved. Three earlier attempts to settle it were
@@ -252,7 +252,7 @@ prohibits.
 > [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md). The mechanism
 > behind this specific 10× figure remains unexplained.
 
-### 6. PD 1P:1D is the wrong ratio for an 8:1 ISL:OSL workload
+### 6. PD 1P:1D showed no advantage on an 8:1 ISL:OSL workload — at shallow depth only
 
 PD delivered its core promise — decode purity (ITL p99 27.5 ms, max 108 ms; per-user
 floor 36 tok/s). At concurrency 40, TTFT read median 17 s / p99 53 s while total
@@ -265,8 +265,10 @@ node idled" is an inference from two throughput numbers, not an observation. Inp
 throughput matching TP16 (~5.6K tok/s) is consistent with equal total compute
 statically partitioned; that reading is also shallow.
 
-At the time we hypothesized PD might still win on decode-heavy traffic — tested on
-07-08, see § Decode-heavy workload: it does not.
+At the time we hypothesized PD might still win on decode-heavy traffic. That was tested on
+07-08, and the test *appeared* to say no — but its conclusion has since been **withdrawn**
+(§ Decode-heavy workload): both arms were measured at 2–3 requests/slot, and equal depth
+turned out not to mean equal distortion. **The decode-heavy question is open.**
 
 ### 7. Engine latency profiles differed, on a single shallow run each
 
@@ -357,7 +359,7 @@ each row from its own reported ITL and TTFT:
 |---|---|---|---|
 | Executive Summary (07-07) | genai-perf | 2 req/slot | **+30% … +55%** |
 | § Decode-heavy (07-08) | `bench_serving` | 3 req/slot | +0% … +2% |
-| Open item 0 steady state | genai-perf | 23.3 req/slot | +3% |
+| Open item 0 deeper whole-run | genai-perf | 23.3 req/slot | +3% |
 
 Per-row for 07-07: R1 +41%, R4 +43%, V1 +44%, L2 +45%, L3 +30%, P1 +55%. The other two
 tables close. **Cause not established** — a plausible hypothesis is that the shallow
@@ -470,16 +472,23 @@ TTFT 4–5× worse, ITL mean 37–49% slower. Those gaps are **not reliable at t
 see the box above — and on the 8K/1K workload the analogous shallow finding (PD −32%
 throughput, ITL mean +37%) reversed once measured deeply, with PD reading *higher*
 throughput and *better* ITL than one node. The 1K/4K numbers below have not been
-re-measured, so nothing here should be cited for or against PD. The one promise PD
-kept is ITL *smoothness* — its ITL distribution is near-zero-variance (c40: p99 36.25 vs
-median 35.18) and max-ITL spikes halve (141 vs 400 ms) because decode is never interrupted
-by prefill — a mechanism consistent with the design, though not separately instrumented
-here. But that trades a persistent 37% ITL-mean regression for the removal of occasional
-spikes, which is a poor trade for the SLO shapes we considered. **Scope:** this
-conclusion covers the two ratios and two workload shapes actually tested (1P+1D at
-8K/1K and 1K/4K, c20 and c40) on this model and hardware — not PD as an architecture.
-PD's untested chances are structural, not workload-shaped: asymmetric xP:yD scaling at
-fleet size, or a shared KV store that removes the per-request P→D push (Open items 3/6).
+re-measured, so nothing here should be cited for or against PD. The **relative**
+numbers below (throughput gaps, ITL means, TTFT ratios) are all subject to the same
+invalidation and none of them should be quoted.
+
+The one observation that does not depend on cross-arm magnitudes: PD's ITL distribution is
+internally near-flat (c40: p99 36.25 vs median 35.18 ms) with max-ITL spikes at 141 ms
+against single-node's 400 ms. That is a within-arm shape, not a comparison of levels, and
+it is consistent with decode never being interrupted by prefill — though not separately
+instrumented. **Whether that smoothness is worth its cost is no longer answerable from
+this data**, because the ITL-mean penalty it was weighed against (−37%) is one of the
+withdrawn numbers; on 8K/1K the equivalent penalty inverted into an advantage once measured
+deeply.
+
+**Scope of the withdrawal:** it covers the quantitative comparisons in this section (1P+1D
+vs 1-node TP8 at 1K/4K, c20 and c40). PD's untested structural options are unaffected and
+remain open: asymmetric xP:yD scaling at fleet size, or a shared KV store that removes the
+per-request P→D push (Open items 5/8).
 
 Corollary, with a caveat: a single TP8 node read 1,521 tok/s at c40 on this profile,
 which is *consistent with* the un-measured "2× TP8 + LB" idea being attractive. But that
@@ -494,7 +503,7 @@ that previously accompanied this sentence is dropped.)
    volume — two requests per concurrency slot — so no TTFT number is a steady-state
    value. Requires: `--measurement-interval` sized from the observed request
    throughput (≥10 requests per slot across the 3 windows perf_analyzer averages —
-   at the ~0.54 req/s TP8 sustained at c20 in steady state that is ~180 s; see the
+   at the ~0.54 req/s TP8 sustained at c20 that is ~180 s; see the
    sizing formula in
    [benchmark-commands.md](benchmark-commands.md#measuring-steady-state)),
    `--stability-percentage 10`,
@@ -511,9 +520,9 @@ that previously accompanied this sentence is dropped.)
    Still open: ≥4 concurrency points per shape (only 2 were captured), and the
    decode-heavy 1K/4K workload.
 
-   TP16 steady state, against its shallow counterpart on the same rig:
+   TP16 deeper whole-run values, against its shallow counterpart on the same rig:
 
-   | TP16 8K/1K | 2 req/slot | steady state |
+   | TP16 8K/1K | 2 req/slot | deeper whole-run |
    |---|---|---|
    | c20 total tok/s | 414.0 | **523.6** (22.1 req/slot) |
    | c20 TTFT p50 | 2,103 ms | **839 ms** |
@@ -524,9 +533,9 @@ that previously accompanied this sentence is dropped.)
    TP16's c20 throughput by 21% but *overstated* c40 by 12%. Cause not established. The
    TP8-vs-TP16 conclusion this enables is in the Finding 5 box above.
 
-   TP8 steady state:
+   TP8 deeper whole-run values:
 
-   | c20 | R4 (2 req/slot) | steady state |
+   | c20 | R4 (2 req/slot) | deeper whole-run |
    |---|---|---|
    | TTFT p50 | 3,202 ms | **869 ms** |
    | TTFT p90 | 17,145 ms | **1,514 ms** |
@@ -535,7 +544,9 @@ that previously accompanied this sentence is dropped.)
    So R4 **overstated** TTFT by ~3.7× (p50) and ~11× (p90) — the shallow window did
    not flatter these numbers, it inflated them, consistent with this report's own
    observation that the TTFT distribution ramped with no plateau (the queue grew
-   throughout the run). Steady state shows a clean plateau (c20 p10 867 → p75 870 ms).
+   throughout the run). The deeper run's percentiles are tightly grouped (c20 p10 867 → p75 870 ms), which is
+   *consistent with* having settled but is **not evidence of it** — percentiles discard
+   request order, and per-window figures were not captured.
 
    ⚠️ The re-measurement also **contradicted this report's assumption that "throughput
    and ITL are much less affected and remain usable"**: at c40, shallow measurement read
@@ -546,10 +557,12 @@ that previously accompanied this sentence is dropped.)
    §"Third rig".
 
    **PD 1P+1D re-measured 2026-07-31 (c20 only)** — same tool, same workload, drained
-   to GPU-idle first, 25.4 requests/slot, clean plateau (p10 2,887 → p50 5,228 →
-   p90 7,695 ms). This inverts row P1's conclusions:
+   to GPU-idle first, 25.4 requests/slot. Percentiles are tightly grouped (p10 2,887 →
+   p50 5,228 → p90 7,695 ms) but that does not demonstrate settling, and only p10/p50/p90
+   were transcribed — short of the full distribution the methodology asks for. This
+   inverts row P1's conclusions:
 
-   | c20 | P1 (2 req/slot) | steady state | vs 1-node TP8 steady |
+   | c20 | P1 (2 req/slot) | deeper whole-run | vs 1-node TP8 (deeper) |
    |---|---|---|---|
    | TTFT p50 | 11,560 ms | **5,228 ms** | 869 ms (TP8 still 6× better) |
    | Total tok/s | 356 | **602.6** | 552.2 (PD +9%) |
@@ -560,7 +573,7 @@ that previously accompanied this sentence is dropped.)
    equivalently, the deeper value is 69% higher). The same comparison on single-node TP8
    moved only 4%. Percentages here are always stated as *error relative to the deeper
    value*, to keep them comparable. Consequences: (a) "PD loses
-   ~32% throughput on 2× the nodes" does not hold at steady state — PD reads slightly
+   ~32% throughput on 2× the nodes" does not hold at the deeper depth — PD reads slightly
    *higher* than one node; (b) the claim that PD's only edge is ITL *variance* "at a
    37% ITL-mean cost" is wrong in sign — PD's ITL mean is **better**, and its ITL p99
    (28.2 ms) and max (28.3 ms) are nearly flat. What survives: PD's TTFT is still much
@@ -632,7 +645,7 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --extra-inputs max_tokens:1024 \
   --extra-inputs ignore_eos:true \
   --extra-inputs '{\"chat_template_kwargs\":{\"enable_thinking\":false}}'"
-# 180 s window: TP8 at c20 sustained ~0.54 req/s at steady state (552 tok/s ÷ 1024 OSL),
+# 180 s window: TP8 at c20 sustained ~0.54 req/s (552 tok/s ÷ 1024 OSL),
 # so three windows give ~290 requests, ~14 per slot (>10). Scale it with your own
 # measured request throughput — see benchmark-commands.md#measuring-steady-state.
 
@@ -641,3 +654,16 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
 # made row P2 permanently unusable. Report the point as "not measurable with
 # genai-perf" — see benchmark-commands.md.
 ```
+
+⚠️ **This command alone does not produce a steady-state result.** genai-perf's printed
+summary aggregates every window, ramp-up included, so it is biased low on latency. Two
+further steps are required and were **not** applied to any figure in this report:
+
+1. Keep `profile_export.json` and trim to the requests whose *last response* falls in the
+   final `3 × interval`, then recompute percentiles over that subset.
+2. Publish per-window percentiles, not just whole-run ones — percentiles discard request
+   order and cannot show whether the queue settled.
+
+And do **not** use `--request-count` to pin depth across arms: it collapses the run to a
+single window, leaving nothing to trim. Procedure and the source references for both points:
+[BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Steps 2–3.

@@ -31,9 +31,9 @@
 > never assume a shallow run left some particular metric intact.
 >
 > What generalised across all three rigs: steady state is a validity precondition; depth
-> must be held in requests-per-slot, not seconds; **distribution shape** (plateau vs
-> monotone ramp) is the diagnostic; and `N` falls as concurrency rises, so one fixed
-> depth must not be reused across a sweep.
+> must be held in requests-per-slot, not seconds; a **monotone ramp across percentiles**
+> reliably indicates a run that never settled (the converse does not hold — see Step 3);
+> and `N` falls as concurrency rises, so one fixed depth must not be reused across a sweep.
 >
 > Open items are tracked in §"Validation checklist". Two of the five are gaps in how the
 > procedure has been *applied* so far — last-three-window extraction (Step 3) and pinned
@@ -72,20 +72,28 @@ per model and becomes an uncontrolled variable.
 The resolution is to **convert steady state from a runtime decision into a
 pre-fixed parameter**:
 
-| Approach | Who decides depth | Same across models? | Use for |
+| Approach | Depth | Excludes ramp-up? | Use for |
 |---|---|---|---|
-| `--measurement-interval` + `--stability-percentage 10` | tool, at runtime | ✗ varies | calibration |
-| `--request-count = N × concurrency` | you, in advance | ✓ identical | comparison |
+| `--measurement-interval` + `--stability-percentage 10` | varies per arm | ✅ yes — multiple windows, trim to last 3 | **everything** |
+| `--request-count = N × concurrency` | ✓ identical across arms | ❌ **no — single window only** | nothing; see Step 2 |
 
-**Requests per concurrency slot (`N`) is the quantity to hold fixed** — not seconds.
-Queue depth is counted in requests, a dimensionless quantity independent of model
-speed. Seconds are not: the same duration corresponds to entirely different queue
-states on a fast versus a slow model.
+**There is no option that gives both.** `--request-count` pins depth but collapses the run
+to one window (`inference_profiler.cc`), so ramp-up cannot be trimmed out of it. Pinning
+duration keeps the windows, at the cost of arms reaching different depths — which is at
+least *measurable* and reportable. Step 2 takes the second trade and says how to disclose
+the residual.
 
-Fixing seconds instead of `N` is not neutral: a slow model completes fewer requests
-per slot in the same window, so it is sampled further from steady state. The two
-models are then measured under different conditions, which is enough to invalidate
-the comparison regardless of which way the error runs.
+**Requests per concurrency slot (`N`) is the quantity you would *want* to hold fixed** —
+not seconds. Queue depth is counted in requests, a dimensionless quantity independent of
+model speed; seconds are not, since the same duration leaves a fast and a slow arm at
+different queue states. Fixing seconds is therefore not neutral: the slower arm completes
+fewer requests per slot and is sampled further from steady state.
+
+**But genai-perf 0.0.16.post1 cannot pin `N` without destroying the window structure**
+(table above), so this document takes the other trade: pin the *interval*, then report each
+arm's realised `N` and treat any cross-arm difference smaller than the `N` gap as
+unresolved. That is a weaker guarantee than fixing `N`, and it is the honest one available.
+If a future tool version lets `--request-count` keep multiple windows, prefer fixing `N`.
 
 > [!WARNING]
 > An earlier version of this section claimed the bias runs *in favour of slow models*,
@@ -115,21 +123,35 @@ interval_ms ≳ (10 × concurrency) / (3 × requests_per_sec) × 1000
 Read the resulting `Request Count` from the report and divide by concurrency to get
 the observed `N`. Round up for headroom.
 
-**Step 2 — Compare (all models, fixed depth).**
+**Step 2 — Compare all arms at one pinned duration, not `--request-count`.**
 
 ```
---concurrency <C>  --request-count <N × C>
+--concurrency <C>  --measurement-interval <ms>  --stability-percentage 10
 ```
 
-Every model now receives an identical treatment: same concurrency, same requests per
-slot, same ISL/OSL, same tool version. Note that `--request-count` mode **skips**
-perf_analyzer's stability check (source: `inference_profiler.cc` — `if request_count
-!= 0 { *is_stable = true; break; }`), which is why Step 1 is not optional.
+…with the **same `<ms>` for every arm**, sized in Step 1 from the *slowest* arm so that
+even it reaches ≥10 requests/slot per window.
+
+> [!CAUTION]
+> **Do not use `--request-count` for the final comparison.** It looks like the right tool
+> for pinning depth, but in 0.0.16.post1 it disables the window loop outright —
+> `inference_profiler.cc`: `// If request-count is specified, then only measure one window
+> and exit` → `if (request_count != 0) { *is_stable = true; break; }`. That leaves exactly
+> one window, so there is nothing to trim in Step 3 and the whole measurement is
+> ramp-up-contaminated by construction. An earlier version of this document told you to do
+> this; it was self-contradictory and is withdrawn.
+
+The trade this makes explicit: **you cannot pin requests-per-slot and exclude ramp-up at
+the same time with this tool.** Pinning duration is the lesser evil, because the residual
+depth difference between arms is measurable (report each arm's observed `Request Count`
+÷ C) whereas ramp-up contamination is not separable after the fact. Fast and slow arms
+will still reach different depths in the same window — **say so, with the numbers**, and
+treat any cross-arm gap smaller than the depth gap as unresolved.
 
 Keep `--num-prompts` above the total request count, or prompt reuse raises
 prefix-cache hit rate mid-run and drags TTFT down.
 
-**Step 3 — Extract the stable windows yourself. The tool will not do it for you.**
+**Step 3 — Trim to the last three windows yourself. The tool will not do it for you.**
 
 > [!CAUTION]
 > **`--stability-percentage` decides when perf_analyzer *stops*, not what gets
@@ -142,18 +164,33 @@ prefix-cache hit rate mid-run and drags TTFT down.
 > stability-detected run is not a steady-state measurement** — it is an average over
 > ramp-up plus steady state.
 >
-> Measured on the L40S rig, restricting to the last three windows vs using the whole
-> run: TTFT p50 **1,729 → 1,988 ms** at c20 (+15%) and **3,345 → 3,673 ms** at c40
-> (+10%). The excluded early requests read p50 350 ms (c20) and 165 ms (c40) — an
-> order of magnitude faster, i.e. an empty queue. **The bias understates latency.**
+> Measured on the L40S rig, last three windows vs whole run: TTFT p50 **1,729 → 1,988 ms**
+> at c20 (+15%) and **3,345 → 3,673 ms** at c40 (+10%). The excluded early requests read
+> p50 350 ms (c20) and 165 ms (c40) — an order of magnitude faster, i.e. an empty queue.
+> **The bias understates latency.**
 
-Take the per-request records from `profile_export.json` (timestamps are ns), keep only
-requests whose start falls inside the last three measurement windows, and recompute the
-percentiles from those. Publish the **full TTFT distribution** (p1…max) for that subset,
-plus `--measurement-interval`, the observed `Request Count`, and the number of windows
-run. Distribution shape is the evidence of settling — a wide spread with no plateau means
-the queue was still growing — and it is the one diagnostic that has held on all three
-rigs.
+From `profile_export.json` (ns timestamps), keep requests whose **last response
+timestamp** falls in the final `3 × interval`, and recompute percentiles over that subset.
+
+⚠️ **Filter on request *end*, not request start.** perf_analyzer attributes a request to
+the window it *finishes* in — `inference_profiler.cc`: `// Only counting requests that end
+within the time interval`, gated on `request_end_ns`. Filtering by start selects a
+different sample than the stability check evaluated, and right-truncates the last window
+(it keeps requests that were still in flight when the run ended). Measured on the L40S rig
+the two differ modestly — c20 p50 2,020 (by start) vs 1,988 ms (by end), c40 identical —
+but the sample sizes differ (300 vs 320 requests at c20), so use `end` to stay consistent
+with the tool.
+
+Publish, for the trimmed subset: the **full TTFT distribution** (p1…max), the
+`--measurement-interval`, each arm's observed `Request Count` ÷ C, and the number of
+windows run.
+
+⚠️ **Percentiles alone cannot show settling.** A wide spread is not proof the queue was
+growing, and a narrow one is not proof it had settled — percentiles discard request order,
+and a stable system under bursty arrivals can be wide. To evidence settling you need the
+*time* dimension: publish **per-window percentiles** (window 1, 2, 3 …) or a TTFT-vs-time
+scatter, and show the last three windows agree. An earlier version of this document
+claimed distribution shape alone was sufficient evidence; that was wrong.
 
 ⚠️ Recomputing by hand introduces its own comparability problem: genai-perf re-encodes
 output text with the tokenizer to count tokens, so **hand-derived throughput and ITL are
@@ -331,7 +368,8 @@ both relative to the deeper value); cause not established.
       `profile_export.json`, which was not done for the GLM-5.2 runs
 - [ ] **Execute Step 2 at least once** — every cross-arm comparison so far used runtime
       stability detection, so the arms ran at different depths (e.g. 14.7 vs 11.6 req/slot).
-      No comparison in this repo has yet pinned `--request-count = N × C` across arms
+      No comparison in this repo has yet used one pinned interval with last-3-window
+      trimming, and each arm's realised depth reported alongside
 - [ ] Confirm `N` calibrated on one model transfers to others in the same comparison
 - [x] A/B the two paths on the **same** hardware — **done on rig 3** (same node, same
       pool, same warmup, drained between runs). The earlier 22% gap attributed to node
