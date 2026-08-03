@@ -1,0 +1,86 @@
+# vLLM Kimi-K3 pre-release image + EFA userspace + aws-ofi-nccl, for cross-node TP16.
+#
+# Why this image exists: the upstream `vllm/vllm-openai:kimi-k3` image ships no
+# EFA userspace at all. Inspected its image config on 2026-07-31 (Docker Hub
+# manifest sha256:fb16b180bd97... -> config sha256:1f7553849e6b...): zero hits
+# for efa / libfabric / ofi / rdma across all 103 history entries. Without these,
+# NCCL has no libfabric to load and cross-node allreduce silently falls back to
+# TCP over eth0 — functional, but the TP16 numbers would be meaningless.
+#
+# This is the vLLM counterpart of Dockerfile.efa-sglang-0513 and adds exactly the
+# same two things, for the same reasons:
+#   - EFA userspace libs (libfabric-aws, rdma-core): what libfabric loads at runtime
+#   - aws-ofi-nccl (libnccl-ofi): lets NCCL allreduce run over EFA
+# Unlike the sglang image there is no NIXL question here — TP16 needs no KV
+# transfer library, so nothing else is installed.
+#
+# Base facts verified from the image config, not assumed:
+#   - Ubuntu 24.04 -> use the installer's UBUNTU2404/x86_64 debs
+#   - CUDA 13.0.1, NCCL 2.30.7 (pip wheel nvidia-nccl-cu13), entrypoint ["vllm","serve"]
+#   - needs an r580+ driver; the p5en nodes report 580.159.03
+#
+# Of the four libnccl-ofi variants in installer 1.49.0, install the plain
+# `libnccl-ofi` (-> /opt/amazon/ofi-nccl/lib): the -ngc-v1/v2/v3 variants target
+# NGC containers, and efa_installer.sh's ngc_filter_package() skips them on a
+# non-NGC setup. Same choice as Dockerfile.efa-sglang-0513.
+#
+# Build (must be amd64; the K3 base is multi-arch so buildx would happily
+# produce an arm64 image that cannot run on p5en):
+#   docker build --platform linux/amd64 -f Dockerfile.efa-vllm-kimi-k3 \
+#     -t <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/vllm-efa-kimi-k3:kimi-k3-efa1.49 .
+#
+# Recipe (h200 multi_node_tp profile): https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=h200
+FROM vllm/vllm-openai:kimi-k3
+
+ARG EFA_INSTALLER_VERSION=1.49.0
+
+# Minimal deps for the EFA installer debs
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        pciutils \
+        libhwloc-dev \
+        libnuma-dev \
+        environment-modules \
+        tcl \
+        pci.ids && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install EFA userspace libraries (libfabric, rdma-core, libibverbs, aws-ofi-nccl).
+# Use apt (not dpkg) on the bundled .debs so deps like ibverbs-providers upgrade
+# cleanly. libfabric-aws-bin supplies fi_info, which the README's EFA
+# verification steps call inside the pod.
+RUN cd /tmp \
+    && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && tar -xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && cd aws-efa-installer/DEBS/UBUNTU2404/x86_64 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ./rdma-core/ibverbs-providers_*.deb \
+        ./rdma-core/libibverbs1_*.deb \
+        ./rdma-core/libibverbs-dev_*.deb \
+        ./rdma-core/librdmacm1_*.deb \
+        ./rdma-core/librdmacm-dev_*.deb \
+        ./rdma-core/rdma-core_*.deb \
+        ./rdma-core/ibverbs-utils_*.deb \
+        ./libfabric1-aws_*.deb \
+        ./libfabric-aws-bin_*.deb \
+        ./libnccl-ofi_*.deb \
+    && rm -rf /var/lib/apt/lists/* /tmp/aws-efa-installer*
+
+# Create symlink for pod's expected path
+RUN ln -sf /opt/amazon/ofi-nccl /opt/amazon/aws-ofi-nccl
+
+ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/aws-ofi-nccl/lib:$LD_LIBRARY_PATH
+ENV PATH=/opt/amazon/efa/bin:$PATH
+
+# Fail the build — not the benchmark — if the pieces this image exists to add are
+# missing. Both are checked because either one alone still leaves NCCL on TCP.
+RUN fi_info --version \
+    && test -f /opt/amazon/aws-ofi-nccl/lib/libnccl-net-ofi.so \
+    && test -f /opt/amazon/efa/lib/libfabric.so.1 \
+    && echo 'EFA userspace + aws-ofi-nccl OK'
+
+# Base image's entrypoint (`vllm serve`) is deliberately kept — the manifest
+# passes the model and engine args as the container's args.
