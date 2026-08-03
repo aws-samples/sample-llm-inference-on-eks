@@ -339,7 +339,11 @@ single-node/PD equivalents). Consequences a reader should know:
   [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 was quantified on the
   L40S rig (whose raw exports survive) and not on these.
 
-Committing raw artifacts, or at minimum the full per-run CSVs, is tracked in Open item 6.
+**Raw artifacts are deliberately not committed** (Open item 4, decided 2026-08-03): the
+per-run exports are 300+ MB each. The consequence is accepted — these figures are not
+independently verifiable from this repo — rather than left as a pending action. The
+obligation it creates applies to future runs: retain `profile_export.json` long enough to
+perform the last-3-window trim before discarding it.
 
 ### Prefix/hierarchical caching was enabled and is an undisclosed confounder
 
@@ -608,10 +612,15 @@ that previously accompanied this sentence is dropped.)
    state" figure in this report is a whole-run average including ramp-up; on the L40S rig
    that bias is +10–15% on TTFT p50. The GLM-5.2 per-request exports were not retained, so
    this requires re-running rather than reprocessing.
-4. **Publish raw artifacts.** The re-measurement data lives in a git-ignored `local/logs/`;
-   nothing committed here lets a reader re-derive the percentiles (see § Raw data for the
-   07-29→31 re-measurements). Decide what belongs in-repo and commit it, or state the
-   figures as unverifiable.
+4. **Raw artifacts stay out of the repo — decided 2026-08-03.** The per-run exports are
+   300+ MB each and the aggregate CSVs live in a git-ignored `local/logs/`, so **the
+   figures in this report are not independently verifiable from anything committed here**,
+   and that is accepted rather than pending. What this obliges instead: future runs must
+   **retain `profile_export.json`** long enough to do the last-3-window trim
+   ([BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3) — not retaining them is
+   why the ramp-up bias had to be quantified on a different rig — and any figure published
+   from a run whose raw data is already gone should be labelled as unverifiable, as the
+   § Raw data section does for these.
 5. PD at 2P:1D ratio (3 nodes) — the last untested PD configuration. Note 1P+1D is **no longer ruled out**: at 8K/1K it reads ahead of one node on throughput and ITL once measured deeply, and the 1K/4K conclusion has been withdrawn (§ Decode-heavy workload).
 6. MTP acceptance-length telemetry was not collected; draft-token tuning was done on cookbook guidance, not measured accept rates.
 7. **Record cache state in future runs** — report the prefix/hierarchical-cache hit rate
