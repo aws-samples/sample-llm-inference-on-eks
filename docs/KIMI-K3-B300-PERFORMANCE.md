@@ -76,7 +76,27 @@ Both shapes were chosen for this test. Output length was pinned via
 measured as null in responses. Measured input length landed at 1023.97–1024.00
 (per-point averages), matching the setting.
 
-Measurement depth was fixed on a steady-state basis: runtime stability detection was
+> [!CAUTION]
+> **The depth procedure described below does not yield steady-state values** — corrected
+> 2026-08-03, after the method was re-examined against the perf_analyzer source. Two
+> defects, both affecting every figure in this document:
+>
+> - **`--request-count` collapses the run to a single measurement window**
+>   (`inference_profiler.cc`: `// If request-count is specified, then only measure one
+>   window and exit`), so the points below cannot have ramp-up excluded — the depth is
+>   pinned, but the window structure needed to trim ramp-up is gone.
+> - Even the calibration run at c64 reports over **all** its windows, ramp-up included,
+>   because `--stability-percentage` controls when perf_analyzer stops, not what it
+>   reports.
+>
+> These are therefore **fixed-depth whole-run averages, not steady-state measurements**,
+> and on another rig the same class of contamination biased TTFT p50 low by 5–19%. The
+> figures are internally consistent (all points share one depth, which is what the
+> concurrency sweep needs) and are left as measured; the "steady-state" label is not
+> justified. Current procedure:
+> [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md).
+
+Measurement depth was fixed at one common value across points: runtime stability detection was
 first enabled on the deepest queue (concurrency 64) using
 `--measurement-interval 120000 --stability-percentage 10`, yielding an observed
 `Request Count` of 768, i.e. 12 requests per concurrency slot. All other points used

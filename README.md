@@ -265,19 +265,27 @@ Condensed from the benchmark writeups — details in [docs/](docs/):
 
 - **`--mem-fraction-static` 0.80 is the safe line** for SGLang under heavy
   8K-input load on H200, single- and multi-node; 0.85 OOM-crashed both shapes.
-- **Multi-node TP needs high concurrency to pay off** — at low concurrency the
-  cross-node allreduce tax makes TP16 slower than TP8.
-- **PD disaggregation ratio must match the traffic** — 1P:1D inverts on
-  prefill-heavy (long-input) workloads; the prefill node bottlenecks while
-  decode idles.
+- **Whether multi-node TP pays off is unresolved** — TP16 read slower than TP8 at
+  c20/c40 on 8K/1K, but every such comparison so far ran the two arms at
+  different measurement depths, so the gap is not established. Do not assume a
+  second node buys throughput or latency on this workload; measure it.
+  ([docs/GLM-5.2-BENCHMARK.md](docs/GLM-5.2-BENCHMARK.md) Finding 5.)
+- **PD disaggregation is not characterised yet** — earlier writeups concluded
+  1P:1D loses on prefill-heavy traffic because the prefill node bottlenecks while
+  decode idles. Both parts are withdrawn: the throughput gap came from
+  under-depth sampling, and no per-node utilisation or queue telemetry was ever
+  collected, so "decode idles" was an inference from two throughput numbers.
 - **Reasoning models need thinking disabled for clean benchmarks** — nested
   `chat_template_kwargs.enable_thinking:false`, not a flat key.
 - **genai-perf defaults don't measure steady state** — it sends only
-  `2 × concurrency` requests and disables its own stability check, so latency
-  comes out optimistic by about an order of magnitude (`--num-prompts` is a
-  sampling pool, not a load knob). Use `--measurement-interval` with
-  `--stability-percentage 10` and verify:
-  [docs/benchmark-commands.md](docs/benchmark-commands.md#measuring-steady-state).
+  `2 × concurrency` requests and disables its own stability check
+  (`--num-prompts` is a sampling pool, not a load knob). **Which metric that
+  ruins, and in which direction, varies by model and GPU** — measured rigs have
+  seen TTFT understated 14×, TTFT *overstated* 2.8×, and throughput overstated
+  53%, so do not assume any metric survived. Setting
+  `--measurement-interval` + `--stability-percentage 10` is necessary but **not
+  sufficient**: the tool still reports over every window including ramp-up.
+  Procedure: [docs/BENCHMARK-METHODOLOGY.md](docs/BENCHMARK-METHODOLOGY.md).
 
 ## Cleanup
 

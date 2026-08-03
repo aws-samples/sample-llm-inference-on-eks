@@ -189,8 +189,9 @@ a period shorter than the window averages out inside it.
 >
 > **Do not publish the tool's summary as a steady-state result.** Trim it first:
 > [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 gives the procedure (keep
-> requests whose *last response* lands in the final `3 × interval`, from
-> `profile_export.json`). And do **not** reach for `--request-count` to pin depth — it
+> filter on the `window_boundaries` array in `profile_export.json` and keep requests whose
+> *last response* falls in the windows you keep — **not** a `3 × interval` time slice, since
+> a window comes out ≈1.2× the configured interval). And do **not** reach for `--request-count` to pin depth — it
 > collapses the run to a single window, which cannot be trimmed at all (Step 2).
 
 When you report, give the **full TTFT distribution** (p1…max) for the trimmed subset, plus

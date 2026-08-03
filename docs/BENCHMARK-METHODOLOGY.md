@@ -90,10 +90,11 @@ different queue states. Fixing seconds is therefore not neutral: the slower arm 
 fewer requests per slot and is sampled further from steady state.
 
 **But genai-perf 0.0.16.post1 cannot pin `N` without destroying the window structure**
-(table above), so this document takes the other trade: pin the *interval*, then report each
-arm's realised `N` and treat any cross-arm difference smaller than the `N` gap as
-unresolved. That is a weaker guarantee than fixing `N`, and it is the honest one available.
-If a future tool version lets `--request-count` keep multiple windows, prefer fixing `N`.
+(table above), so this document takes the other trade: pin the *interval*, publish each
+arm's realised depth, and **treat the resulting comparison as confounded** — not as
+valid-above-some-threshold (Step 2 explains why no such threshold exists). Establishing a
+cross-arm claim then requires the extra work of measuring depth-response per arm. If a
+future tool version lets `--request-count` keep multiple windows, prefer fixing `N`.
 
 > [!WARNING]
 > An earlier version of this section claimed the bias runs *in favour of slow models*,
@@ -143,10 +144,25 @@ even it reaches ≥10 requests/slot per window.
 
 The trade this makes explicit: **you cannot pin requests-per-slot and exclude ramp-up at
 the same time with this tool.** Pinning duration is the lesser evil, because the residual
-depth difference between arms is measurable (report each arm's observed `Request Count`
-÷ C) whereas ramp-up contamination is not separable after the fact. Fast and slow arms
-will still reach different depths in the same window — **say so, with the numbers**, and
-treat any cross-arm gap smaller than the depth gap as unresolved.
+depth difference between arms is at least *visible* — report each arm's realised depth as
+**trimmed sample size ÷ concurrency**, computed after the Step 3 window trim, not
+GenAI-Perf's `Request Count` (which spans the whole run and so describes a different
+population than the figures you publish).
+
+> [!CAUTION]
+> **A depth gap is not an error bound.** Fast and slow arms reach different depths in the
+> same window, and it is tempting to treat "metric gap larger than depth gap" as a validity
+> test. **There is no basis for that** — this document's own data shows the same depth
+> change moving PD's throughput 41% and TP8's 4%, and moving TP16's throughput in
+> *opposite directions* at c20 and c40. Depth-response is neither uniform across arms nor
+> monotone, so a 27% depth gap licenses no conclusion about a 6% metric gap in either
+> direction, and a *larger* metric gap is not thereby validated. An earlier version of this
+> document proposed exactly that heuristic; it is withdrawn.
+>
+> **An unmatched-depth comparison is confounded, full stop.** The only ways out are to
+> measure each arm's depth-response (run it at several depths and show the metric has
+> flattened) or to obtain matched depths some other way. Until one of those is done, report
+> the arms separately with their depths attached and state that no cross-arm claim follows.
 
 Keep `--num-prompts` above the total request count, or prompt reuse raises
 prefix-cache hit rate mid-run and drags TTFT down.
@@ -164,22 +180,35 @@ prefix-cache hit rate mid-run and drags TTFT down.
 > stability-detected run is not a steady-state measurement** — it is an average over
 > ramp-up plus steady state.
 >
-> Measured on the L40S rig, last three windows vs whole run: TTFT p50 **1,729 → 1,988 ms**
-> at c20 (+15%) and **3,345 → 3,673 ms** at c40 (+10%). The excluded early requests read
-> p50 350 ms (c20) and 165 ms (c40) — an order of magnitude faster, i.e. an empty queue.
-> **The bias understates latency.**
+> Measured on the L40S rig, dropping window 1 and keeping the rest: TTFT p50
+> **1,729 → 2,059 ms** at c20 (+19%) and **3,345 → 3,510 ms** at c40 (+5%). Per-window
+> percentiles show why — c20 window 1 p50 is 1,639 ms against 2,059 / 2,074 for windows 2
+> and 3; c40 is 2,583 against 3,695 / 3,510. **The bias understates latency.**
 
-From `profile_export.json` (ns timestamps), keep requests whose **last response
-timestamp** falls in the final `3 × interval`, and recompute percentiles over that subset.
+**Use the `window_boundaries` array in `profile_export.json` — do not reconstruct windows
+from the interval.** Each experiment carries an explicit list of boundary timestamps (ns),
+`n+1` of them for `n` windows. Filter requests whose **last response timestamp** falls
+between the boundaries you want to keep, and drop the early windows rather than a time
+slice.
+
+⚠️ **`interval` is not the window width.** In 0.0.16.post1 a window comes out ≈1.2× the
+configured interval — on the L40S rig, 60 s configured produced three 72.0 s windows. So
+`last 3 × interval` covers only ≈2.5 real windows and silently cuts into the one you meant
+to keep. An earlier version of this document told you to slice on `3 × interval`; that was
+wrong, and the "+10–15%" it produced was an artefact of the bad cutoff, not a measurement
+of ramp-up. The figures above are recomputed from the real boundaries.
+
+⚠️ **Check how many windows you actually have before trimming.** These runs stabilised in
+the minimum three, and every request landed inside them (0 before the first boundary, 0
+after the last) — so "keep the last three" would have been a no-op. With three windows the
+only available trim is dropping window 1, which is what the numbers above do. If you want
+three *settled* windows to report, the run needs more than three in total: raise
+`--measurement-interval` or lower `--stability-percentage`.
 
 ⚠️ **Filter on request *end*, not request start.** perf_analyzer attributes a request to
 the window it *finishes* in — `inference_profiler.cc`: `// Only counting requests that end
 within the time interval`, gated on `request_end_ns`. Filtering by start selects a
-different sample than the stability check evaluated, and right-truncates the last window
-(it keeps requests that were still in flight when the run ended). Measured on the L40S rig
-the two differ modestly — c20 p50 2,020 (by start) vs 1,988 ms (by end), c40 identical —
-but the sample sizes differ (300 vs 320 requests at c20), so use `end` to stay consistent
-with the tool.
+different sample than the stability check evaluated and right-truncates the final window.
 
 Publish, for the trimmed subset: the **full TTFT distribution** (p1…max), the
 `--measurement-interval`, each arm's observed `Request Count` ÷ C, and the number of
@@ -283,7 +312,7 @@ v0.5.13.post1 (same engine version as the original GLM-5.2 report), genai-perf
 prompt pool (2000), identical `--warmup-request-count`, server **drained to GPU-idle
 before each run**, only measurement depth differing.
 
-| | 2 req/slot | steady state | Change |
+| | 2 req/slot | deeper whole-run | Change |
 |---|---|---|---|
 | **c20** — depth | 40 | 466 (23.3/slot) | |
 | TTFT p50 | 785 ms | 869 ms | +11% |
@@ -297,7 +326,7 @@ before each run**, only measurement depth differing.
 | ITL avg | 27.4 ms | 54.5 ms | +99% |
 
 **The TTFT error was small (1.1–1.2× at p50) but throughput was inflated by 53% at
-c40** (1,070 read vs 698 real). This is the reverse of the L40S rig, where TTFT moved
+c40** (1,070 shallow vs 698 deeper). This is the reverse of the L40S rig, where TTFT moved
 6–14× and throughput held to ±5%. ITL moved with throughput (27.4 → 54.5 ms at c40).
 
 Mechanism not established — no batch-occupancy or KV-utilisation telemetry was
@@ -323,7 +352,7 @@ the *most* depth-sensitive metric measured. Do not cite shallow-run throughput.
 
 **Re-validation of the original GLM-5.2 report:** the archived TP8 figures
 (`docs/GLM-5.2-BENCHMARK.md`, row R4: TTFT p50 3,202 ms / p90 17,145 ms, 456 tok/s)
-compare against steady state as p50 869 ms / p90 1,514 ms / 552 tok/s — i.e. the
+compare against the deeper whole-run values p50 869 ms / p90 1,514 ms / 552 tok/s — i.e. the
 original **overstated** TTFT by ~3.7× (p50) and ~11× (p90). That is the opposite
 direction from this document's original prediction, and consistent with the report's
 own observation that its TTFT distribution ramped with no plateau: the queue was
@@ -334,7 +363,7 @@ reproduced within ~21% across a different account/cluster.
 measurement that resolves the c20-vs-c40 reversal described in §"Known unexplained
 observation":
 
-| TP16 8K/1K | 2 req/slot | steady state |
+| TP16 8K/1K | 2 req/slot | deeper whole-run |
 |---|---|---|
 | c20 TTFT p90 | 12,119 ms | **901 ms** (22.1 req/slot) |
 | c40 TTFT p90 | 1,684 ms | **1,644 ms** (11.6 req/slot) |
@@ -342,7 +371,7 @@ observation":
 | c40 throughput | 738.7 tok/s | **659.1** |
 
 At 2 requests/slot the reversal reproduces — c20's p90 reads **7× worse than c40's**,
-the same qualitative anomaly as the original report's 14.8 s vs 1.5 s. At steady state it
+the same qualitative anomaly as the original report's 14.8 s vs 1.5 s. At the deeper depth it
 disappears: p90 rises with concurrency (901 → 1,644 ms), which is the expected direction.
 
 **So under-depth sampling does explain that anomaly**, at least on this shape — the
@@ -360,7 +389,7 @@ both relative to the deeper value); cause not established.
       8K/1K with a clean 2-req/slot A/B at both c20 and c40**
 - [x] Re-check the GLM-5.2 / H200 case now that the bias direction is known to vary —
       **done: §"Third rig". TTFT bias small; throughput bias large. TP8 only**
-- [x] Re-measure the **TP16** GLM-5.2 shape at steady state — **done 2026-07-30 on
+- [x] Re-measure the **TP16** GLM-5.2 shape at greater depth — **done 2026-07-30 on
       2× p5en; the c20-vs-c40 reversal reproduced at 2 req/slot and vanished at steady
       state, so under-depth sampling does explain it on this shape**
 - [ ] **Re-derive every published figure from the last three windows only** — all current
@@ -401,7 +430,7 @@ still does not explain that reversal, and its cause remains unknown.
 **Updated 2026-07-30 (rig 3, same model on H200/TP8):** shallow measurement again
 failed to reverse direction — at 2 req/slot, TTFT p90 read 1,634 ms at c20 and 959 ms
 at c40, so it *did* read lower at higher concurrency, but only by 1.7×, nothing like
-the 10× in the original TP16 data. At steady state the ordering corrected to the
+the 10× in the original TP16 data. At the deeper depth the ordering corrected to the
 expected direction (1,514 ms at c20 → 1,772 ms at c40).
 
 ## Resolved 2026-07-30 — the reversal *was* under-depth sampling
@@ -409,7 +438,7 @@ expected direction (1,514 ms at c20 → 1,772 ms at c40).
 Measured on the shape where it was originally seen: **GLM-5.2 TP16, 2× p5en**, same tool
 and workload, drained between runs.
 
-| TP16 TTFT p90 | 2 req/slot | steady state |
+| TP16 TTFT p90 | 2 req/slot | deeper whole-run |
 |---|---|---|
 | c20 | 12,119 ms | **901 ms** (22.1 req/slot) |
 | c40 | 1,684 ms | **1,644 ms** (11.6 req/slot) |

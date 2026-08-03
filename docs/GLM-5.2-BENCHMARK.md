@@ -128,9 +128,9 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 > 1. **Depths were not matched.** These runs used runtime stability detection, so each arm
 >    stopped at whatever depth it happened to reach. At c40 that is 14.7 vs 11.6
 >    requests/slot — **a 27% difference in measurement depth used to support a 6%
->    difference in throughput.** The methodology's own Step 2 exists to prevent exactly
->    this: a cross-arm comparison must pin `--request-count = N × C` to the same `N` for
->    every arm. That step was never executed.
+>    difference in throughput.** And the depth gap gives no error bound in either
+>    direction — this report's own data shows the same depth change moving PD's throughput
+>    41% and TP8's 4%, and moving TP16's in opposite directions at c20 vs c40.
 > 2. **Neither number is a steady-state value.** Both were computed over the whole run
 >    including ramp-up (see [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3),
 >    and the contamination is not equal between arms — TP16 reached a shallower depth, so
@@ -140,8 +140,10 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 > to survive these confounds** — it is within ~6% of one node while using twice the
 > hardware, and the original "TP16 turns the corner at c40" rested on a
 > 2-requests-per-slot reading of 730 tok/s. Whether TP16 is actually behind, level, or
-> marginally ahead is **not established**. Resolving it needs both arms re-run at one
-> pinned `N` with last-three-window extraction; see Open item 2.
+> marginally ahead is **not established**. Note `--request-count` cannot fix this: it
+> collapses the run to one window, so depth and ramp-up cannot both be controlled
+> ([BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 2). Resolving it means running
+> each arm at several depths and showing the metric has flattened; see Open item 2.
 >
 > Also unexplained: the depth bias on TP16 changes sign with concurrency (c20 throughput
 > 414 → 524, +27%; c40 739 → 659, −11%). And no NCCL or EFA counters were ever collected,
@@ -605,7 +607,9 @@ that previously accompanied this sentence is dropped.)
    behind one node, but that comparison is not valid: the arms stopped at **different
    depths** (14.7 vs 11.6 req/slot at c40, a 27% gap used to support a 6% difference) and
    neither figure excludes ramp-up. A valid run needs: one `N` pinned across both arms via
-   `--request-count = N × C` (methodology Step 2, never executed), last-three-window
+   depth-response measured per arm (several depths per arm, showing the metric has
+   flattened — `--request-count` cannot pin depth without collapsing the run to one
+   window), window-boundary
    extraction (Step 3), **≥4 concurrency points**, and retained `profile_export.json`.
    The mechanism is separately unmeasured — no NCCL/EFA counters were ever collected.
 3. **Re-derive the 07-29→31 numbers from the last three windows only.** Every "steady
@@ -668,8 +672,10 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
 summary aggregates every window, ramp-up included, so it is biased low on latency. Two
 further steps are required and were **not** applied to any figure in this report:
 
-1. Keep `profile_export.json` and trim to the requests whose *last response* falls in the
-   final `3 × interval`, then recompute percentiles over that subset.
+1. Keep `profile_export.json` and trim using its `window_boundaries` array — drop the
+   early windows and keep requests whose *last response* falls inside the ones retained.
+   Do not slice on `3 × interval`: a window is ≈1.2× the configured interval, so that
+   cuts into the windows you meant to keep.
 2. Publish per-window percentiles, not just whole-run ones — percentiles discard request
    order and cannot show whether the queue settled.
 

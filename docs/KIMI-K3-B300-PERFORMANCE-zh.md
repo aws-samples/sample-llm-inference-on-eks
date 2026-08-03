@@ -66,7 +66,23 @@ CUDA Graph 捕获在 8 个 TP worker 上各耗时 78–82 秒。整个测试过�
 `{"chat_template_kwargs":{"enable_thinking":false}}` 关闭，实测响应中 `reasoning`
 字段为 null。输入长度实测落在 1023.97–1024.00（各档均值），与设定一致。
 
-测量深度按稳态原则确定：先在最深队列（并发 64）启用运行时稳态检测
+> [!CAUTION]
+> **下述深度流程并不产生稳态值** —— 2026-08-03 对照 perf_analyzer 源码复核后更正。
+> 两个缺陷都影响本文全部数字：
+>
+> - **`--request-count` 会把整轮压缩成单个测量窗口**
+>   （`inference_profiler.cc`：`// If request-count is specified, then only measure one
+>   window and exit`），因此下面各档无法排除 ramp-up —— 深度是固定了，但用于裁掉
+>   ramp-up 的窗口结构不存在了。
+> - 即便是 c64 那次标定运行，也是对**全部**窗口（含 ramp-up）汇总的，因为
+>   `--stability-percentage` 只决定 perf_analyzer 何时停止，不决定它报告什么。
+>
+> 所以这些是**固定深度的全程平均值，不是稳态测量**；在另一套硬件上，同类污染使
+> TTFT p50 偏低 5–19%。这些数字内部是自洽的（各档共用同一深度，这正是并发扫描
+> 需要的），按实测保留；但「稳态」这个标签不成立。当前流程见
+> [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md)。
+
+测量深度固定为各档共用的同一值：先在最深队列（并发 64）启用运行时稳态检测
 （`--measurement-interval 120000 --stability-percentage 10`），观测到
 `Request Count` 为 768，即每个并发槽 12 个请求；其余各档均以
 `--request-count = 12 × 并发数` 固定同一深度，实际为 12/96/192/384/768。
