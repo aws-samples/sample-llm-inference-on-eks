@@ -104,7 +104,7 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 | Priority | Recommended shape | Basis |
 |---|---|---|
 | Max throughput per dollar | **Undetermined** | The former pick (2× independent TP8 replicas) was an extrapolation from a shallow single-node number (456 × 2 ≈ 912 tok/s). At the deeper depth TP8 c20 reads 552 tok/s, so the same arithmetic gives ~1,104 — and neither figure has been measured on two replicas. Mixing shallow, steady-state and extrapolated bases in one comparison is not valid; see Open item 1. |
-| Hard TTFT SLO at c20–c40 | **Undetermined, but no evidence favours TP16** | Deeper runs put TTFT p50 level between the two (869 vs 839 ms at c20; 892 vs 848 ms at c40) with c40 tails within noise (p90/p99 1,772 / 3,362 ms TP8 vs 1,644 / 3,291 TP16), and TP16's throughput ~6% lower on twice the hardware. But the two arms ran at different measurement depths (14.7 vs 11.6 req/slot at c40) and neither excludes ramp-up, so none of those gaps is established. What is clear is that nothing here justifies the second node; see the Finding 5 box and Open item 2. |
+| Hard TTFT SLO at c20–c40 | **Undetermined** | Deeper runs read TTFT p50 level between the two (869 vs 839 ms at c20; 892 vs 848 ms at c40), c40 tails comparable (p90/p99 1,772 / 3,362 ms TP8 vs 1,644 / 3,291 TP16), and TP16's throughput ~6% lower. But each arm is **n=1 with no variance estimate** and includes ramp-up, so none of those differences is established — including the absence of one. This row previously read "no evidence favours TP16", which overstates what a single unreplicated pair can show. Cost remains a separate, non-measurement argument: TP16 uses twice the hardware. |
 | Low concurrency / single-node budget | 1-node TP8 (SGLang and vLLM both viable) | The 456 / 454 / 476 tok/s readings are shallow and n=1 with no variance estimate, so they establish neither a "wall" nor a tie between engines. What survives: both engines served this model and workload without crashing at mem 0.80. |
 | Strict ITL SLO (8K/1K) | **Undetermined** | The earlier verdict ("PD's only edge is ITL *variance*, at a 37% ITL-mean cost") was an artefact of 2-requests-per-slot sampling and is withdrawn. Deeper runs happen to read PD's ITL mean below one node's (27.2 vs 34.4 ms at c20) at the cost of TTFT (5,228 vs 869 ms) — but that is **one comparison, n=1, no variance estimate, ramp-up included, c20 only** (c40 is not measurable through the router). No cross-arm claim follows from it, including a directional one: "unlikely to be noise" was asserted here without a variance estimate to support it. |
 | Decode-heavy workloads (1K/4K) | **Undetermined** | The § Decode-heavy workload comparison is internally consistent (same tool, same depth both arms) but both arms are shallow, and shallow measurement is now known to distort PD far more than single-node TP8 (41% vs 4% throughput error at c20 on 8K/1K, relative to the deeper value). Its −32%/−27% throughput gaps have not been re-measured at any greater depth. |
@@ -204,9 +204,9 @@ SGLang's default `max_prefill_tokens=16384` caps the effective chunk. Setting `-
 c20/c40 put TP16 within ~6% of a single TP8 node (523.6 vs 552.2 tok/s at c20; 659.1 vs
 698.1 at c40) while using twice the hardware — but each arm is **a single run with no
 variance estimate**, and neither figure excludes ramp-up, so a 6% gap cannot be read off
-them. See the box above, and Open item 2 for what a valid run requires. What is safe to
-say: TP16 shows **no throughput advantage large enough to survive those limitations**, and
-the original "c40 is where TP16 turns the corner" rested on a 2-requests-per-slot reading.
+them — in either direction. See the box above, and Open item 2 for what a valid run
+requires. What is safe to say is only about the *old* claim: "c40 is where TP16 turns the
+corner" rested on a 2-requests-per-slot reading of 730 tok/s and is unsupported.
 
 **Originally observed at c20 (shallow):** TP16 read lower total throughput than TP8
 (396 vs 456 tok/s) and higher ITL (32.4 vs 27.5 ms), on 2× the hardware. The direction
@@ -571,21 +571,23 @@ that previously accompanied this sentence is dropped.)
 
    | c20 | P1 (2 req/slot) | deeper whole-run | vs 1-node TP8 (deeper) |
    |---|---|---|---|
-   | TTFT p50 | 11,560 ms | **5,228 ms** | 869 ms (TP8 still 6× better) |
-   | Total tok/s | 356 | **602.6** | 552.2 (PD +9%) |
-   | ITL avg | 25.0 ms | **27.2 ms** | 34.4 ms (PD 21% faster) |
-   | tok/s/user | 40.5 | **36.7** | 29.5 (PD faster) |
+   | TTFT p50 | 11,560 ms | **5,228 ms** | 869 ms |
+   | Total tok/s | 356 | **602.6** | 552.2 |
+   | ITL avg | 25.0 ms | **27.2 ms** | 34.4 ms |
+   | tok/s/user | 40.5 | **36.7** | 29.5 |
+
+   The third column is the TP8 figure at the same concurrency, for scale only — **not a
+   validated comparison**: both arms are n=1 without a variance estimate and both include
+   ramp-up, so no cross-arm claim follows in either direction.
 
    Shallow measurement read PD's throughput 41% below the deeper value (356 vs 602.6 —
    equivalently, the deeper value is 69% higher). The same comparison on single-node TP8
    moved only 4%. Percentages here are always stated as *error relative to the deeper
-   value*, to keep them comparable. Consequences: (a) "PD loses
-   ~32% throughput on 2× the nodes" does not hold at the deeper depth — PD reads slightly
-   *higher* than one node; (b) the claim that PD's only edge is ITL *variance* "at a
-   37% ITL-mean cost" is wrong in sign — PD's ITL mean is **better**, and its ITL p99
-   (28.2 ms) and max (28.3 ms) are nearly flat. What survives: PD's TTFT is still much
-   worse (6× at c20). Why depth affects PD so much more than TP8 was **not
-   investigated** — no queue or KV telemetry was collected.
+   value*, to keep them comparable. What this does establish is **negative**: the published
+   claims "PD loses ~32% throughput on 2× the nodes" and "PD's only edge is ITL variance, at
+   a 37% ITL-mean cost" both rest on shallow readings that moved by 41% on this shape, so
+   neither is supported. It does **not** establish the reverse. Why depth affects PD so much
+   more than TP8 was **not investigated** — no queue or KV telemetry was collected.
 
    ⚠️ **PD at c40 could not be measured.** genai-perf aborts during parsing against the
    sglang-router (`orjson.JSONDecodeError`): of 850,089 response chunks, 72 (0.0085%)
@@ -598,7 +600,7 @@ that previously accompanied this sentence is dropped.)
    another load generator — c40-through-the-router is simply **not measurable with
    genai-perf** at this version.
 1. **2× TP8 replicas at c40** — never measured. Any extrapolation must start from the
-   steady-state single-node figure (552 tok/s at c20 → ~1,104 for two replicas), not the
+   deeper single-node figure (552 tok/s at c20 → ~1,104 for two replicas), not the
    shallow 456; the earlier "~912 tok/s" and "~3,000 tok/s on 1K/4K" estimates were built
    on shallow numbers and are withdrawn. Even the corrected figure assumes perfect linear
    scaling with no shared-resource contention, which is itself untested. Requires freeing
@@ -626,7 +628,7 @@ that previously accompanied this sentence is dropped.)
    why the ramp-up bias had to be quantified on a different rig — and any figure published
    from a run whose raw data is already gone should be labelled as unverifiable, as the
    § Raw data section does for these.
-5. PD at 2P:1D ratio (3 nodes) — the last untested PD configuration. Note 1P+1D is **no longer ruled out**: at 8K/1K it reads ahead of one node on throughput and ITL once measured deeply, and the 1K/4K conclusion has been withdrawn (§ Decode-heavy workload).
+5. PD at 2P:1D ratio (3 nodes) — the last untested PD configuration. Note 1P+1D is **no longer ruled out**: the 8K/1K and 1K/4K conclusions against it have both been withdrawn (§ Decode-heavy workload, Open item 0). Neither is it shown to be ahead — the deeper 8K/1K pair is n=1.
 6. MTP acceptance-length telemetry was not collected; draft-token tuning was done on cookbook guidance, not measured accept rates.
 7. **Record cache state in future runs** — report the prefix/hierarchical-cache hit rate
    (and the prompt-pool size) alongside each result, so cache warming can be excluded as a

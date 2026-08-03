@@ -154,11 +154,16 @@ perf_analyzer then repeats measurement windows until the max/min ratio across th
 most recent 3 windows is within the threshold for both throughput and latency.
 
 **Size the interval from measured request throughput — do not copy a constant.**
-Aim for at least 10 requests per concurrency slot across the 3 windows:
+Aim for at least 10 requests per concurrency slot **in each window** (the window is the unit
+the stability check compares):
 
 ```
-interval_ms ≳ (10 × concurrency) / (3 × requests_per_sec) × 1000
+interval_ms ≳ (10 × concurrency) / requests_per_sec × 1000
 ```
+
+⚠️ The worked examples below were computed with an earlier formula that divided by 3 (i.e.
+~3.3 requests/slot per window), so they are ~3× smaller than this rule now asks for. They are
+the intervals actually used for the runs in this repo, kept for traceability.
 
 Get `requests_per_sec` from a short throwaway run (it is in the report as *Request
 Throughput*), then round up. Two worked examples, same tooling, three orders of
@@ -195,10 +200,10 @@ a period shorter than the window averages out inside it.
 > And do **not** reach for `--request-count` to pin depth — it collapses the run to a single
 > window, which cannot be trimmed at all (Step 2).
 >
-> Note `stability_window` is hard-coded to 3, so a stable run yields exactly three windows
-> and raising the interval only widens them. To get three *usable* windows, warm the server
-> first (`--warmup-request-count` well above one-per-slot, plus a drain to idle) rather than
-> trying to produce more windows.
+> Note three windows is the *minimum*, not a cap (`stability_window` is a rolling window), and
+> `--warmup-request-count` will **not** hand you a warm queue — perf_analyzer drains and
+> clears its workers after warmup, so window 1 always contains the queue-filling transient.
+> Plan to drop it: publish per-window numbers and report which windows you retained.
 
 When you report, give the **full TTFT distribution** (p1…max) for the trimmed subset, the
 interval, **per-window percentiles** (whole-run percentiles discard request order and cannot

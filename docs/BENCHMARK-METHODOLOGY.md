@@ -30,10 +30,10 @@
 > §"Measured basis", §"Second rig" and §"Third rig" as an observation from that rig, and
 > never assume a shallow run left some particular metric intact.
 >
-> What generalised across all three rigs: steady state is a validity precondition; depth
-> must be held in requests-per-slot, not seconds; a **monotone ramp across percentiles**
-> reliably indicates a run that never settled (the converse does not hold — see Step 3);
-> and `N` falls as concurrency rises, so one fixed depth must not be reused across a sweep.
+> What generalised across all three rigs: steady state is a validity precondition; a
+> **monotone ramp across percentiles** reliably indicates a run that never settled (the
+> converse does not hold — see Step 3); and the depth a run *needs* in order to settle falls
+> as concurrency rises, so a depth that suffices at high concurrency may not at low.
 >
 > Open items are tracked in §"Validation checklist". Two of the five are gaps in how the
 > procedure has been *applied* so far — last-three-window extraction (Step 3) and pinned
@@ -57,31 +57,29 @@ model*, so equal measurement duration and equal measurement depth cannot both ho
 
 ## Proposed resolution
 
-**These are not competing conditions. Steady state is a validity precondition;
-measurement depth is the controlled variable.**
+**These are not competing conditions — the apparent conflict comes from mistaking an
+outcome for a controlled variable.**
 
 A latency figure taken before the queue settles is not "latency under a different
 condition" — it is a mis-measurement. Comparing two mis-measured numbers is not a
 comparison. So steady state is not something to trade off against control; it is
 what makes the numbers mean anything.
 
-The real problem hidden inside the question is different, and it is legitimate: if
-steady state is determined *at runtime* by the tool, then measurement depth varies
-per model and becomes an uncontrolled variable.
+The dissolution: under a closed-loop generator the **experimental conditions are workload,
+concurrency and window duration**. How many requests each arm completes in that window is a
+*result* — largely a restatement of its throughput. There is nothing to equalise, so there
+is no tension with measuring long enough to settle. What has to be verified instead is that
+the windows you report are **stationary**, and unequal sample sizes are handled the ordinary
+way (repeat runs, confidence intervals).
 
-The resolution is to **convert steady state from a runtime decision into a
-pre-fixed parameter**:
-
-| Approach | Depth | Excludes ramp-up? | Use for |
+| Approach | What it fixes | Excludes ramp-up? | Use for |
 |---|---|---|---|
-| `--measurement-interval` + `--stability-percentage 10` | varies per arm | ✅ yes — multiple windows, trim to last 3 | **everything** |
-| `--request-count = N × concurrency` | ✓ identical across arms | ❌ **no — single window only** | nothing; see Step 2 |
+| `--measurement-interval` + `--stability-percentage 10` | duration per window | ✅ yes — multiple windows, drop the transient ones | **everything** |
+| `--request-count = N × concurrency` | total requests | ❌ **no — single window only** | nothing; see Step 2 |
 
-**There is no option that gives both.** `--request-count` pins depth but collapses the run
-to one window (`inference_profiler.cc`), so ramp-up cannot be trimmed out of it. Pinning
-duration keeps the windows, at the cost of arms reaching different depths — which is at
-least *measurable* and reportable. Step 2 takes the second trade and says how to disclose
-the residual.
+`--request-count` looks attractive because it equalises request counts across arms, but it
+collapses the run to one window (`inference_profiler.cc`), so ramp-up cannot be trimmed —
+and equalising counts was never the right goal anyway (Step 2).
 
 **What to hold fixed: workload, concurrency, and window duration.** Under a closed-loop
 load generator those three *are* the experimental conditions. Concurrency caps the number
@@ -127,15 +125,21 @@ Run the **slowest** model in the comparison set with runtime stability detection
 --measurement-interval <ms>  --stability-percentage 10
 ```
 
-Size the interval from measured request throughput; aim for ≥10 requests per slot
-across the 3 windows perf_analyzer averages:
+Size the interval so that **each individual window** holds ≥10 requests per concurrency
+slot — a window is the unit the stability check compares, so a window with too few requests
+makes the check meaningless:
 
 ```
-interval_ms ≳ (10 × concurrency) / (3 × requests_per_sec) × 1000
+interval_ms ≳ (10 × concurrency) / requests_per_sec × 1000
 ```
 
-Read the resulting `Request Count` from the report and divide by concurrency to get
-the observed `N`. Round up for headroom.
+(An earlier version divided by 3, targeting 10 requests/slot summed across the three
+windows — i.e. ~3.3 per window. That is too thin for a per-window stability comparison. The
+worked examples below were computed with the old formula and are therefore ~3× smaller than
+this rule now asks for; they are left as the intervals actually used.)
+
+Round up, and keep the interval well above one request's end-to-end latency or a window can
+close with almost nothing finished inside it.
 
 **Step 2 — Compare all arms at one pinned duration, not `--request-count`.**
 
@@ -143,8 +147,8 @@ the observed `N`. Round up for headroom.
 --concurrency <C>  --measurement-interval <ms>  --stability-percentage 10
 ```
 
-…with the **same `<ms>` for every arm**, sized in Step 1 from the *slowest* arm so that
-even it reaches ≥10 requests/slot per window.
+…with the **same `<ms>` for every arm**, sized in Step 1 from the *slowest* arm so that even
+it clears ≥10 requests/slot in a single window.
 
 > [!CAUTION]
 > **Do not use `--request-count` for the final comparison.** It looks like the right tool
@@ -212,30 +216,36 @@ to keep. An earlier version of this document told you to slice on `3 × interval
 wrong, and the "+10–15%" it produced was an artefact of the bad cutoff, not a measurement
 of ramp-up. The figures above are recomputed from the real boundaries.
 
-⚠️ **You usually cannot get three *settled* windows out of this tool, and raising the
-interval does not help.** `stability_window` is hard-coded to 3
-(`inference_profiler.cc:522`), so a run that satisfies the threshold stops at exactly three
-windows — a longer interval makes each window *wider*, never adds one. Lowering
-`--stability-percentage` can force more windows but only by rejecting the first attempts;
-it guarantees nothing.
+⚠️ **`--warmup-request-count` does not hand you a warm queue.** perf_analyzer runs the
+warmup as a separate load phase and then calls `WaitForWarmupAndCleanup()`, which joins every
+worker thread and clears `workers_`/`threads_` before the measured load starts
+(`load_manager.cc`). So warmup can prime weights, caches and CUDA graphs, but the
+closed-loop queue starts **empty** either way, and window 1 still contains the queue-filling
+transient. An earlier version of this document claimed a large warmup makes all three windows
+usable; that was wrong.
 
-So the realistic options, in order of preference:
+⚠️ **Window count is not capped at three.** `stability_window` is 3
+(`inference_profiler.cc:522`), but `DetermineStability` uses it as a *rolling* window —
+`idx = infer_per_sec.size() - stability_window`, sliding forward as windows accumulate — so a
+run that does not satisfy the threshold keeps adding windows indefinitely. Three windows is
+the *minimum*, and what you get when the run stabilises immediately. An earlier version of
+this document said raising the interval "only widens" the windows and could not add any;
+that was wrong about the mechanism, though the practical consequence for an
+already-stabilising run is similar.
 
-1. **Warm the server before measuring, so window 1 is not ramp-up.** Set
-   `--warmup-request-count` well above one-per-slot (enough to fill the queue and the
-   caches), and drain to idle first. Then all three windows are usable and the stationarity
-   check across them is meaningful. This is the only option that both trims ramp-up and
-   keeps three windows.
-2. **Drop window 1 and report the remaining two**, stating that stationarity rests on two
-   windows rather than three. That is what the numbers above do — it is weaker evidence, not
-   no evidence.
-3. **If window 1 differs materially from 2 and 3 and you have only three windows, say the
-   run cannot demonstrate steady state** and report it as such rather than publishing a
-   percentile.
+**So plan for the transient rather than trying to avoid it:**
+
+1. **Report the per-window numbers and drop the windows that differ.** With the usual three
+   windows that means publishing windows 2–3 and saying stationarity rests on two. That is
+   what the figures above do.
+2. **If you need three settled windows, make the run longer than the minimum** — e.g. a
+   tighter `--stability-percentage`, so the early windows fail the check and more are
+   collected. This is a nudge, not a guarantee.
+3. **If window 1 differs materially and you have only three, say the run cannot demonstrate
+   steady state** and report it as such rather than publishing a percentile.
 
 These runs stabilised in the minimum three, with every request inside them (0 before the
-first boundary, 0 after the last), so "keep the last three" was a no-op and option 2 is what
-the figures above reflect.
+first boundary, 0 after the last), so option 1 is what the figures above reflect.
 
 ⚠️ **Filter on request *end*, not request start.** perf_analyzer attributes a request to
 the window it *finishes* in — `inference_profiler.cc`: `// Only counting requests that end
@@ -243,7 +253,8 @@ within the time interval`, gated on `request_end_ns`. Filtering by start selects
 different sample than the stability check evaluated and right-truncates the final window.
 
 Publish, for the trimmed subset: the **full TTFT distribution** (p1…max), the
-`--measurement-interval`, each arm's observed `Request Count` ÷ C, and the number of
+`--measurement-interval`, each arm's **trimmed sample size ÷ C** (not GenAI-Perf's whole-run
+`Request Count`), and the number of
 windows run.
 
 ⚠️ **Percentiles alone cannot show settling.** A wide spread is not proof the queue was
@@ -321,9 +332,10 @@ startup transient is proportionally more severe than on a small dense model.
 
 **What survives and what does not:**
 
-- **Survives** — steady state is a validity precondition; depth must be fixed in
-  requests/slot, not seconds; distribution shape is the evidence of settling. All of
-  §"Proposed resolution" and §"Procedure" stand, and were used successfully here.
+- **Survives** — steady state is a validity precondition, and a monotone ramp across
+  percentiles marks a run that never settled. (This bullet previously also claimed "depth
+  must be fixed in requests/slot" and that distribution shape *proves* settling; both are
+  withdrawn — see §"Proposed resolution" and Step 3.)
 - **Does not survive** — the claim that short measurement biases *in favour of slow
   models* because it understates TTFT. The bias direction is rig-dependent.
   **Consequence: short-window results cannot be assumed conservative in either
@@ -427,10 +439,10 @@ both relative to the deeper value); cause not established.
 - [ ] **Re-derive every published figure from stationary windows only** — all current
       numbers are whole-run averages including ramp-up (Step 3). Requires retaining
       `profile_export.json`, which was not done for the GLM-5.2 runs
-- [ ] **Execute Step 2 at least once** — every cross-arm comparison so far used runtime
-      stability detection, so the arms ran at different depths (e.g. 14.7 vs 11.6 req/slot).
-      No comparison in this repo has yet used one pinned interval with last-3-window
-      trimming, and each arm's realised depth reported alongside
+- [ ] **Execute Step 2 as now written, at least once** — no comparison in this repo yet
+      combines one pinned interval, window-boundary trimming to stationary windows, repeat
+      runs with a spread or confidence interval, and each arm's trimmed sample size reported
+      alongside
 - [ ] Confirm `N` calibrated on one model transfers to others in the same comparison
 - [x] A/B the two paths on the **same** hardware — **done on rig 3** (same node, same
       pool, same warmup, drained between runs). The earlier 22% gap attributed to node
