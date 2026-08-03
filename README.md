@@ -48,6 +48,7 @@ manifest with instance types and maintenance status.
 │   ├── KIMI-K3-B300-PERFORMANCE-zh.md # ^ 同一内容中文版
 │   ├── PD_DISAGGREGATION.md    # Prefill/decode disaggregation architecture deep-dive
 │   ├── benchmark-commands.md   # genai-perf / bench_serving command reference
+│   ├── BENCHMARK-METHODOLOGY.md  # How to measure steady state and compare fairly
 │   └── BENCHMARK-REPORTING-PRINCIPLES.md  # Rules for writing up benchmark results
 ├── infrastructure/
 │   └── terraform/              # Optional: build the cluster from scratch
