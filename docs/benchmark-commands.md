@@ -184,21 +184,29 @@ a period shorter than the window averages out inside it.
 > **The numbers genai-perf prints at the end of a stability-detected run still include
 > every ramp-up window.** `--stability-percentage` decides when perf_analyzer *stops*, not
 > what gets reported: it collects all windows, and GenAI-Perf then aggregates **all**
-> requests in the export. Measured on the L40S rig, trimming to the last three windows
-> raises TTFT p50 by 10–15%, so the printed summary is **biased low on latency**.
+> requests in the export. Measured on the L40S rig, dropping the first window raises TTFT
+> p50 by **5–19%** (c40 +5%, c20 +19%), so the printed summary is **biased low on latency**.
 >
 > **Do not publish the tool's summary as a steady-state result.** Trim it first:
-> [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 gives the procedure (keep
-> filter on the `window_boundaries` array in `profile_export.json` and keep requests whose
-> *last response* falls in the windows you keep — **not** a `3 × interval` time slice, since
-> a window comes out ≈1.2× the configured interval). And do **not** reach for `--request-count` to pin depth — it
-> collapses the run to a single window, which cannot be trimmed at all (Step 2).
+> [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 gives the procedure — filter on
+> the `window_boundaries` array in `profile_export.json`, keeping requests whose *last
+> response* falls in the windows you retain. Do **not** slice on `3 × interval`: a window
+> comes out ≈1.2× the configured interval, so that cuts into the windows you meant to keep.
+> And do **not** reach for `--request-count` to pin depth — it collapses the run to a single
+> window, which cannot be trimmed at all (Step 2).
+>
+> Note `stability_window` is hard-coded to 3, so a stable run yields exactly three windows
+> and raising the interval only widens them. To get three *usable* windows, warm the server
+> first (`--warmup-request-count` well above one-per-slot, plus a drain to idle) rather than
+> trying to produce more windows.
 
-When you report, give the **full TTFT distribution** (p1…max) for the trimmed subset, plus
-the interval, the observed `Request Count` ÷ concurrency, and **per-window percentiles** —
-percentiles over the whole run cannot show whether the queue had settled, because they
-discard request order. A p50 that improves as concurrency rises is a methodology red flag,
-not a result.
+When you report, give the **full TTFT distribution** (p1…max) for the trimmed subset, the
+interval, **per-window percentiles** (whole-run percentiles discard request order and cannot
+show whether the queue settled), and the **trimmed sample size ÷ concurrency** — not
+GenAI-Perf's `Request Count`, which spans the whole run and so describes a different
+population than the figures you publish. Sample sizes will differ between arms; that costs
+precision, not validity, so repeat runs and publish the spread. A p50 that improves as
+concurrency rises is a methodology red flag, not a result.
 
 ---
 

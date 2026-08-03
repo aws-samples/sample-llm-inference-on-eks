@@ -90,10 +90,16 @@ measured as null in responses. Measured input length landed at 1023.97–1024.00
 >   reports.
 >
 > These are therefore **fixed-depth whole-run averages, not steady-state measurements**,
-> and on another rig the same class of contamination biased TTFT p50 low by 5–19%. The
-> figures are internally consistent (all points share one depth, which is what the
-> concurrency sweep needs) and are left as measured; the "steady-state" label is not
-> justified. Current procedure:
+> and on another rig the same class of contamination biased TTFT p50 low by 5–19%.
+>
+> **Sharing one depth across the sweep does not make the sweep self-consistent.** The
+> depth a run *needs* to settle falls as concurrency rises (measured elsewhere: 23.3
+> requests/slot at c20 vs 14.7 at c40), so a single `12 × concurrency` reused at 1/8/16/32/64
+> is not equally deep relative to each point's requirement — it is likely too shallow at the
+> low-concurrency end and adequate at the high end. Conclusions that compare *across*
+> concurrency points — the efficiency knee, the shape of the throughput curve — inherit that
+> unevenness on top of the ramp-up contamination above, and should be treated as
+> provisional. The per-point numbers are left as measured. Current procedure:
 > [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md).
 
 Measurement depth was fixed at one common value across points: runtime stability detection was

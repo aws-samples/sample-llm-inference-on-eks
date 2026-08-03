@@ -6,12 +6,12 @@
 > **Every number published from this methodology so far was computed over the whole run,
 > ramp-up included.** Step 3 explains why: `--stability-percentage` controls when
 > perf_analyzer stops, not what it reports, and GenAI-Perf aggregates every request in the
-> export. Measured on the L40S rig, isolating the last three windows raises TTFT p50 by
-> 10–15%. So the existing figures in §"Measured basis", §"Second rig" and §"Third rig",
+> export. Measured on the L40S rig, dropping the first (ramp-up) window raises TTFT p50 by
+> 5–19%. So the existing figures in §"Measured basis", §"Second rig" and §"Third rig",
 > and every "steady state" number in
 > [GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md), are **closer to steady state than the
 > 2-requests-per-slot defaults but still contaminated, and biased low on latency.** They
-> are not the final word; re-deriving them from the last three windows is tracked in
+> are not the final word; re-deriving them from stationary windows only is tracked in
 > §"Validation checklist".
 
 > [!IMPORTANT]
@@ -83,18 +83,31 @@ duration keeps the windows, at the cost of arms reaching different depths — wh
 least *measurable* and reportable. Step 2 takes the second trade and says how to disclose
 the residual.
 
-**Requests per concurrency slot (`N`) is the quantity you would *want* to hold fixed** —
-not seconds. Queue depth is counted in requests, a dimensionless quantity independent of
-model speed; seconds are not, since the same duration leaves a fast and a slow arm at
-different queue states. Fixing seconds is therefore not neutral: the slower arm completes
-fewer requests per slot and is sampled further from steady state.
+**What to hold fixed: workload, concurrency, and window duration.** Under a closed-loop
+load generator those three *are* the experimental conditions. Concurrency caps the number
+of in-flight requests, so the queue depth each arm sees is pinned by `--concurrency`, not by
+how many requests it happens to finish.
 
-**But genai-perf 0.0.16.post1 cannot pin `N` without destroying the window structure**
-(table above), so this document takes the other trade: pin the *interval*, publish each
-arm's realised depth, and **treat the resulting comparison as confounded** — not as
-valid-above-some-threshold (Step 2 explains why no such threshold exists). Establishing a
-cross-arm claim then requires the extra work of measuring depth-response per arm. If a
-future tool version lets `--request-count` keep multiple windows, prefer fixing `N`.
+**Realised `N` (`completed requests ÷ concurrency`) is an outcome, not a condition** —
+under fixed concurrency and fixed duration it is essentially a restatement of throughput
+plus sample size. Our own data shows this directly: at c20, TP16/TP8 read 0.948 on
+throughput and **0.948 on N** — the same number twice. (At c40 the two diverge, 0.944 vs
+0.789, only because the TP16 run stopped after ~4 windows against TP8's ~4.8 — again a
+consequence of the run, not a controlled input.)
+
+> [!CAUTION]
+> **Do not require matched `N` across arms, and do not treat unmatched `N` as
+> automatically fatal.** An earlier version of this document did both. It is circular: a
+> faster arm completes more requests in the same window *by definition*, so demanding equal
+> `N` demands equal throughput — which is the thing under test. What differing `N` actually
+> costs you is **statistical precision** (fewer samples in the smaller arm), not validity.
+>
+> The condition that does matter is **stationarity of the windows you report**: show the
+> retained windows agree with each other (Step 3), and the comparison stands regardless of
+> how many requests each arm needed to get there. Handle the unequal sample sizes the
+> ordinary way — repeat runs, and publish a confidence interval or at least the run-to-run
+> spread. Every figure in this repo is n=1 with no variance estimate, which is a real
+> limitation and the honest reason its cross-arm gaps stay provisional.
 
 > [!WARNING]
 > An earlier version of this section claimed the bias runs *in favour of slow models*,
@@ -142,32 +155,33 @@ even it reaches ≥10 requests/slot per window.
 > ramp-up-contaminated by construction. An earlier version of this document told you to do
 > this; it was self-contradictory and is withdrawn.
 
-The trade this makes explicit: **you cannot pin requests-per-slot and exclude ramp-up at
-the same time with this tool.** Pinning duration is the lesser evil, because the residual
-depth difference between arms is at least *visible* — report each arm's realised depth as
-**trimmed sample size ÷ concurrency**, computed after the Step 3 window trim, not
-GenAI-Perf's `Request Count` (which spans the whole run and so describes a different
-population than the figures you publish).
+**What to report instead of a matched depth.** Give each arm's **trimmed sample size ÷
+concurrency** (computed after the Step 3 window trim — not GenAI-Perf's `Request Count`,
+which spans the whole run and so describes a different population than the figures you
+publish), and give the evidence that the retained windows are stationary. The sample sizes
+will differ between arms; that is expected and affects precision, not validity.
 
 > [!CAUTION]
-> **A depth gap is not an error bound.** Fast and slow arms reach different depths in the
-> same window, and it is tempting to treat "metric gap larger than depth gap" as a validity
-> test. **There is no basis for that** — this document's own data shows the same depth
-> change moving PD's throughput 41% and TP8's 4%, and moving TP16's throughput in
-> *opposite directions* at c20 and c40. Depth-response is neither uniform across arms nor
-> monotone, so a 27% depth gap licenses no conclusion about a 6% metric gap in either
-> direction, and a *larger* metric gap is not thereby validated. An earlier version of this
-> document proposed exactly that heuristic; it is withdrawn.
+> **Two heuristics this document previously endorsed are withdrawn.**
 >
-> **An unmatched-depth comparison is confounded, full stop.** The only ways out are to
-> measure each arm's depth-response (run it at several depths and show the metric has
-> flattened) or to obtain matched depths some other way. Until one of those is done, report
-> the arms separately with their depths attached and state that no cross-arm claim follows.
+> - *"Treat any cross-arm gap smaller than the depth gap as unresolved."* There is no basis
+>   for it. Depth-response is neither uniform across arms nor monotone — the same depth
+>   change moved PD's throughput 41% and TP8's 4%, and moved TP16's in *opposite
+>   directions* at c20 vs c40. So a depth gap bounds nothing in either direction, and a
+>   *larger* metric gap is not thereby validated.
+> - *"An unmatched-`N` comparison is confounded, full stop."* Too strong, and circular —
+>   see the note above Step 1. Under fixed concurrency and fixed duration, differing `N`
+>   *is* the throughput difference under test.
+>
+> What actually blocks a cross-arm claim: windows that are not stationary, ramp-up left in
+> the numbers, or n=1 with no variance estimate. All three apply to the figures currently in
+> this repo, which is why its cross-arm gaps are reported as provisional rather than as
+> results.
 
 Keep `--num-prompts` above the total request count, or prompt reuse raises
 prefix-cache hit rate mid-run and drags TTFT down.
 
-**Step 3 — Trim to the last three windows yourself. The tool will not do it for you.**
+**Step 3 — Trim to the stationary windows yourself. The tool will not do it for you.**
 
 > [!CAUTION]
 > **`--stability-percentage` decides when perf_analyzer *stops*, not what gets
@@ -198,12 +212,30 @@ to keep. An earlier version of this document told you to slice on `3 × interval
 wrong, and the "+10–15%" it produced was an artefact of the bad cutoff, not a measurement
 of ramp-up. The figures above are recomputed from the real boundaries.
 
-⚠️ **Check how many windows you actually have before trimming.** These runs stabilised in
-the minimum three, and every request landed inside them (0 before the first boundary, 0
-after the last) — so "keep the last three" would have been a no-op. With three windows the
-only available trim is dropping window 1, which is what the numbers above do. If you want
-three *settled* windows to report, the run needs more than three in total: raise
-`--measurement-interval` or lower `--stability-percentage`.
+⚠️ **You usually cannot get three *settled* windows out of this tool, and raising the
+interval does not help.** `stability_window` is hard-coded to 3
+(`inference_profiler.cc:522`), so a run that satisfies the threshold stops at exactly three
+windows — a longer interval makes each window *wider*, never adds one. Lowering
+`--stability-percentage` can force more windows but only by rejecting the first attempts;
+it guarantees nothing.
+
+So the realistic options, in order of preference:
+
+1. **Warm the server before measuring, so window 1 is not ramp-up.** Set
+   `--warmup-request-count` well above one-per-slot (enough to fill the queue and the
+   caches), and drain to idle first. Then all three windows are usable and the stationarity
+   check across them is meaningful. This is the only option that both trims ramp-up and
+   keeps three windows.
+2. **Drop window 1 and report the remaining two**, stating that stationarity rests on two
+   windows rather than three. That is what the numbers above do — it is weaker evidence, not
+   no evidence.
+3. **If window 1 differs materially from 2 and 3 and you have only three windows, say the
+   run cannot demonstrate steady state** and report it as such rather than publishing a
+   percentile.
+
+These runs stabilised in the minimum three, with every request inside them (0 before the
+first boundary, 0 after the last), so "keep the last three" was a no-op and option 2 is what
+the figures above reflect.
 
 ⚠️ **Filter on request *end*, not request start.** perf_analyzer attributes a request to
 the window it *finishes* in — `inference_profiler.cc`: `// Only counting requests that end
@@ -218,7 +250,7 @@ windows run.
 growing, and a narrow one is not proof it had settled — percentiles discard request order,
 and a stable system under bursty arrivals can be wide. To evidence settling you need the
 *time* dimension: publish **per-window percentiles** (window 1, 2, 3 …) or a TTFT-vs-time
-scatter, and show the last three windows agree. An earlier version of this document
+scatter, and show the retained windows agree. An earlier version of this document
 claimed distribution shape alone was sufficient evidence; that was wrong.
 
 ⚠️ Recomputing by hand introduces its own comparability problem: genai-perf re-encodes
@@ -392,7 +424,7 @@ both relative to the deeper value); cause not established.
 - [x] Re-measure the **TP16** GLM-5.2 shape at greater depth — **done 2026-07-30 on
       2× p5en; the c20-vs-c40 reversal reproduced at 2 req/slot and vanished at steady
       state, so under-depth sampling does explain it on this shape**
-- [ ] **Re-derive every published figure from the last three windows only** — all current
+- [ ] **Re-derive every published figure from stationary windows only** — all current
       numbers are whole-run averages including ramp-up (Step 3). Requires retaining
       `profile_export.json`, which was not done for the GLM-5.2 runs
 - [ ] **Execute Step 2 at least once** — every cross-arm comparison so far used runtime
