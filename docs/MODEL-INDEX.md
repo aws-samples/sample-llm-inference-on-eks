@@ -50,17 +50,27 @@ KV-cache offload & externalization (HiCache / LMCache / Redis L2) measured in
 
 ## Kimi-K3 (`moonshotai/Kimi-K3`, 2.8T MXFP4 MoE)
 
-Args follow the official recipe's B300 profile
-([recipes.vllm.ai](https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=b300)).
-Pre-release: requires the `vllm/vllm-openai:kimi-k3` image (vLLM ≥ 0.27.0
-nightly), the one manifest here not pinned to an immutable tag.
+**Start with the single-node B300 shape** — it is the one that has been benchmarked
+([English](KIMI-K3-B300-PERFORMANCE.md) / [中文](KIMI-K3-B300-PERFORMANCE-zh.md),
+2026-07-29) and it runs the recipe without the H200 profile's restrictions. The
+2-node TP16 shape exists for sites without B300 capacity.
 
-Deployed and benchmarked 2026-07-29 — measured performance in
-[English](KIMI-K3-B300-PERFORMANCE.md) / [中文](KIMI-K3-B300-PERFORMANCE-zh.md).
+Args follow the official recipe's per-hardware profile —
+[b300](https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=b300) for the single-node
+manifest, [h200](https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=h200) for the
+TP16 one. The two differ in more than TP size: the 2.8T MXFP4 checkpoint needs
+~1680 GB, so on 2× 1128 GB the recipe drops context from 1M to 32K, `--max-num-seqs`
+to 5, and switches the MoE kernel to `marlin` — and the manifest goes one step
+further to 29,696 tokens, because 32K does not fit on this rig (the engine refuses to
+start; see the arg comment). Pre-release: requires the `vllm/vllm-openai:kimi-k3`
+image (vLLM ≥ 0.27.0 nightly), the manifests here not pinned to an immutable tag.
+The TP16 shape additionally needs an EFA-enabled rebuild — the upstream image ships
+no EFA userspace, so cross-node NCCL would fall back to TCP.
 
 | Shape | Manifest | Instances | Status |
 |---|---|---|---|
-| 1-node TP8, vLLM | `vllm/kimi-k3-p6-b300-vllm.yaml` | 1× p6-b300.48xlarge | ✅ |
+| 1-node TP8, vLLM — **default** | `vllm/kimi-k3-p6-b300-vllm.yaml` | 1× p6-b300.48xlarge | ✅ |
+| 2-node TP16, vLLM LWS+EFA — fallback, 29.7K context / `max-num-seqs 5` | `lws/lws-kimi-k3-tp16-p5en.yaml` | 2× p5en.48xlarge | ✅ |
 
 ## Qwen
 
@@ -92,5 +102,5 @@ performance reference.
 | Priority class | `infra/priority-class.yaml` |
 | genai-perf client pod (Triton 26.06 SDK) | `genai-perf/genai-perf-triton-2606.yaml` |
 | Chat UI | `addons/open-webui.yaml` |
-| EFA image builds (SGLang) | `lws/Dockerfile.efa-*` (suffix = sglang version; `-nixl-` = adds NIXL for PD KV transfer) |
+| EFA image builds | `lws/Dockerfile.efa-*` (suffix = engine + version, e.g. `-sglang-0513`, `-vllm-kimi-k3`; `-nixl-` = adds NIXL for PD KV transfer) |
 | Benchmark command reference | [benchmark-commands.md](benchmark-commands.md) |

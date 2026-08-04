@@ -58,7 +58,7 @@ manifest with instance types and maintenance status.
     ├── sglang/                 # Single-node SGLang deployments
     ├── vllm/                   # Single-node vLLM deployments
     ├── lws/                    # Multi-node: LeaderWorkerSet + EFA (TP across nodes, PD-disagg)
-    │   └── Dockerfile.efa-*    # EFA-enabled SGLang image builds (suffix = sglang version)
+    │   └── Dockerfile.efa-*    # EFA-enabled engine image builds (suffix = engine + version)
     ├── genai-perf/             # Load-test client pod (no GPU)
     └── addons/                 # Optional: Open WebUI chat interface
 ```
