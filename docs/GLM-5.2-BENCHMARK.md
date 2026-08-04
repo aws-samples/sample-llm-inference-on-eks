@@ -6,8 +6,10 @@
 **Load generator**: NVIDIA genai-perf 0.0.16.post1 (Triton 26.06 SDK pod, in-cluster); `sglang.bench_serving` for PD-router runs and all decode-heavy runs (genai-perf SSE parser fails against the router at concurrency 40). **Measurement volume in the original 07-07/07-08 campaigns was left at genai-perf's defaults, so none of those figures is a steady-state measurement — latency and throughput alike.** Rows marked with a prime (L2′, L3′, P1′) and the tables in Open item 0 are much deeper re-measurements from 2026-07-29→31 and are the ones to prefer — but they are still whole-run averages that include ramp-up, not steady-state values, and each is a single run with no variance estimate. See the warning below and § Traceability and known defects.
 
 > [!IMPORTANT]
-> **Reading guide.** This report's *qualitative* findings (crash mechanisms, config
-> interactions, the PD-vs-TP8 direction) are the parts that hold up. Its *quantitative*
+> **Reading guide.** This report's *qualitative* findings (crash mechanisms and config
+> interactions — e.g. the `mem-fraction-static` OOM line, the `expandable_segments`
+> incompatibility, the `max_prefill_tokens` cap) are the parts that hold up. Its
+> shape-vs-shape comparisons do **not**: every one is n=1 without a variance estimate. Its *quantitative*
 > tables were taken at 2–3 requests per concurrency slot and should not be cited as
 > absolute numbers, or compared across concurrency levels. The
 > § Traceability and known defects section lists what is unrecoverable and why; Open
@@ -71,9 +73,9 @@ smaller rig: dropping the first, ramp-up window raises TTFT p50 by 5–19%). See
 [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3. Every unprimed row was taken
 at 2–3 requests per concurrency slot: the struck-through TTFT columns are unusable and so
 are the rate columns (ITL, tok/s/user, total tok/s) — that defect was confirmed, not
-assumed, in Open item 0. Nothing here is bolded as a winner, because **no comparison in
-this table has matched measurement depth between its arms** — the prerequisite the
-methodology's Step 2 exists to enforce. R4's deep counterpart is in Open item 0.
+assumed, in Open item 0. Nothing here is bolded as a winner, because **every row is a single
+run with no variance estimate and includes ramp-up**, so no comparison in this table is
+established. R4's deep counterpart is in Open item 0.
 
 | # | Shape | Config | Conc. | ~~TTFT p50~~ | ~~TTFT p90/p99~~ | ~~ITL avg~~ | ~~tok/s/user~~ | ~~Total tok/s~~ | Ran to completion |
 |---|---|---|---|---|---|---|---|---|---|
@@ -138,14 +140,14 @@ comparable; P2 must not be read against P1 or L3 as if it shared their basis.
 >    and the contamination is not equal between arms — TP16 reached a shallower depth, so
 >    proportionally more of its run is ramp-up.
 >
-> What can be said: at 8K/1K, c20–c40, **TP16 shows no throughput advantage large enough
-> to survive these confounds** — it is within ~6% of one node while using twice the
-> hardware, and the original "TP16 turns the corner at c40" rested on a
-> 2-requests-per-slot reading of 730 tok/s. Whether TP16 is actually behind, level, or
-> marginally ahead is **not established**. Note `--request-count` cannot fix this: it
-> collapses the run to one window, so depth and ramp-up cannot both be controlled
-> ([BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 2). Resolving it means running
-> each arm at several depths and showing the metric has flattened; see Open item 2.
+> What can be said is only negative: the original "TP16 turns the corner at c40" rested on a
+> 2-requests-per-slot reading of 730 tok/s and is **unsupported**. Whether TP16 is behind,
+> level, or ahead of one node is **not established in any direction** — the deeper pair
+> differs by 5–6%, which a single unreplicated run cannot resolve. Note `--request-count`
+> cannot fix this: it
+> collapses the run to one window, so ramp-up cannot be trimmed
+> ([BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 2). Resolving it means repeat
+> runs per arm with an uncertainty estimate, on trimmed stationary windows; see Open item 2.
 >
 > Also unexplained: the depth bias on TP16 changes sign with concurrency — relative to the
 > deeper value, the shallow reading is **21% low** at c20 (414 vs 524) but **12% high** at
@@ -210,13 +212,14 @@ requires. What is safe to say is only about the *old* claim: "c40 is where TP16 
 corner" rested on a 2-requests-per-slot reading of 730 tok/s and is unsupported.
 
 **Originally observed at c20 (shallow):** TP16 read lower total throughput than TP8
-(396 vs 456 tok/s) and higher ITL (32.4 vs 27.5 ms), on 2× the hardware. The direction
-turned out to be right, but both numbers were shallow readings.
+(396 vs 456 tok/s) and higher ITL (32.4 vs 27.5 ms), on 2× the hardware. Both numbers were
+shallow readings, and the deeper re-measurement neither confirmed nor overturned the gap —
+it is within the range a single unreplicated run cannot resolve.
 
 **Mechanism not established.** The standing hypothesis — under-fed GPUs at low
 concurrency plus two cross-node EFA allreduces per decode step — is consistent with the
 ITL direction, but **no NCCL or EFA counters were collected at any point**, so the
-allreduce cost has never been measured. Why the second node adds nothing here remains
+allreduce cost has never been measured. Whether the second node contributes at all remains
 unexplained.
 
 **Withdrawn — the c20→c40 "1.84× gain".** It compared L2 (c20, 396) against L3 (c40,
@@ -511,9 +514,9 @@ that previously accompanied this sentence is dropped.)
    claim from this report). Every run here used genai-perf's default measurement
    volume — two requests per concurrency slot — so no TTFT number is a steady-state
    value. Requires: `--measurement-interval` sized from the observed request
-   throughput (≥10 requests per slot across the 3 windows perf_analyzer averages —
-   at the ~0.54 req/s TP8 sustained at c20 that is ~180 s; see the
-   sizing formula in
+   throughput (≥10 requests per slot **in each window** — at the ~0.54 req/s TP8 sustained
+   at c20 that needs a ~310 s interval, not the 180 s these runs used, which gives only
+   ~5.8 requests/slot per window; see the sizing formula in
    [benchmark-commands.md](benchmark-commands.md#measuring-steady-state)),
    `--stability-percentage 10`,
    `--num-prompts` above the total request count, and **≥4 concurrency points** so a
@@ -653,7 +656,7 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --url <service>.default.svc.cluster.local:80 \
   --endpoint-type chat --streaming \
   --concurrency 20 \
-  --measurement-interval 180000 \
+  --measurement-interval 310000 \
   --stability-percentage 10 \
   --warmup-request-count 20 \
   --num-prompts 2000 \
@@ -663,9 +666,11 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --extra-inputs max_tokens:1024 \
   --extra-inputs ignore_eos:true \
   --extra-inputs '{\"chat_template_kwargs\":{\"enable_thinking\":false}}'"
-# 180 s window: TP8 at c20 sustained ~0.54 req/s (552 tok/s ÷ 1024 OSL),
-# so three windows give ~290 requests, ~14 per slot (>10). Scale it with your own
-# measured request throughput — see benchmark-commands.md#measuring-steady-state.
+# 310 s interval: TP8 at c20 sustained ~0.54 req/s (552 tok/s / 1024 OSL). A window
+# needs (10 x 20) / 0.54 = ~370 s to hold 10 requests/slot, and a window is 1.2x the
+# interval, so 370 / 1.2 = ~310 s. NOTE the published runs used 180000, which gives only
+# ~5.8 requests/slot per window - one reason those figures are provisional.
+# Recompute from your own measured throughput: benchmark-commands.md#measuring-steady-state.
 
 # When genai-perf's SSE parser chokes (PD router, c40+): do NOT switch load
 # generator. Cross-tool numbers are not comparable and that substitution is what

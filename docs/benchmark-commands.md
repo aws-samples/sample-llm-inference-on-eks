@@ -65,7 +65,7 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --url glm-5-2.default.svc.cluster.local:80 \
   --endpoint-type chat --streaming \
   --concurrency 20 \
-  --measurement-interval 180000 \
+  --measurement-interval 310000 \
   --stability-percentage 10 \
   --warmup-request-count 20 \
   --num-prompts 2000 \
@@ -77,10 +77,16 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --extra-inputs '{"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
-Set `--warmup-request-count` to the concurrency value (one warm request per slot;
-warmup records are discarded by perf_analyzer and never enter the report). The
-`180000` above is derived for *this* workload — see
-[Measuring steady state](#measuring-steady-state) for how to size it for yours.
+Set `--warmup-request-count` to the concurrency value (one warm request per slot; warmup
+records are discarded by perf_analyzer and never enter the report).
+
+The `310000` is derived for *this* workload and **must be recomputed for yours** — see
+[Measuring steady state](#measuring-steady-state). Derivation: GLM-5.2 TP8 at c20 sustains
+~0.54 req/s, so a window needs `(10 × 20) / 0.54 ≈ 370 s`, and a window is 1.2× the interval
+→ `370 / 1.2 ≈ 310 s`. ⚠️ The runs recorded in
+[GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md) used `180000`, which at that rate gives only
+**5.8 requests/slot per window** — below the ≥10 the stability comparison needs. That is one
+of the reasons those figures are reported as provisional.
 
 Known issue: at concurrency ≥40 against the sglang-router (PD setups), the SSE
 parser fails (`splintered SSE response` / `orjson.JSONDecodeError`) even though the
@@ -169,11 +175,16 @@ Get `requests_per_sec` from a short throwaway run (it is in the report as *Reque
 Throughput*), then round up. Two worked examples, same tooling, three orders of
 magnitude apart in workload:
 
-| Workload | Request throughput | Interval |
-|---|---|---|
-| 8B model, 2K-in/256-out, c20 | ~1.8 /s | 60 s |
-| GLM-5.2 MoE TP8, 8K-in/1K-out, c20 | ~0.45 /s | 180 s |
-| GLM-5.2 MoE TP8, 8K-in/1K-out, c40 | ~0.80 /s | 180 s |
+| Workload | Request throughput | This rule requires | Actually used (per-window depth) |
+|---|---|---|---|
+| 8B model, 2K-in/256-out, c20 | ~1.8 /s | ~95 s | 60 s (6.5 req/slot) |
+| GLM-5.2 MoE TP8, 8K-in/1K-out, c20 | ~0.54 /s | ~310 s | 180 s (5.8 req/slot) |
+| GLM-5.2 MoE TP8, 8K-in/1K-out, c40 | ~0.80 /s | ~420 s | 180 s (4.3 req/slot) |
+
+⚠️ **Every run published in this repo used the right-hand column**, and all of them fall
+below the ≥10 req/slot/window this rule asks for — they were sized with an earlier formula
+that divided by 3. Use the third column for new runs; the fourth is kept so the published
+figures can be traced. (Window = 1.2 × interval, so the depth is `interval × 1.2 × rps ÷ C`.)
 
 Also keep the interval well above a single request's end-to-end latency, or a window
 can close with almost nothing completed inside it.

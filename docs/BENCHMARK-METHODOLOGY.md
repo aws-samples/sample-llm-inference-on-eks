@@ -32,16 +32,17 @@
 >
 > What generalised across all three rigs: steady state is a validity precondition; a
 > **monotone ramp across percentiles** reliably indicates a run that never settled (the
-> converse does not hold — see Step 3); and the depth a run *needs* in order to settle falls
-> as concurrency rises, so a depth that suffices at high concurrency may not at low.
+> converse does not hold — see Step 3). Note also that the depth a run *realises* under
+> stability detection falls as concurrency rises (23.3 req/slot at c20 vs 14.7 at c40 on rig
+> 3) — an observation about outcomes, not a target to match.
 >
 > Open items are tracked in §"Validation checklist". Two of the five are gaps in how the
-> procedure has been *applied* so far — last-three-window extraction (Step 3) and pinned
-> depth across arms (Step 2) have never been executed; the rest concern whether *numbers*
+> procedure has been *applied* so far — window trimming (Step 3) and repeat runs with an
+> uncertainty estimate (Step 2) have never been done; the rest concern whether *numbers*
 > transfer between rigs.
 >
-> Created 2026-07-28 as a draft; procedure documented 2026-08-03. The procedure itself is
-> settled, but Steps 2 and 3 have not yet been executed on any published comparison.
+> Created 2026-07-28 as a draft; procedure documented 2026-08-03, corrected 2026-08-04. No
+> published comparison in this repo has yet followed Steps 2–3 as now written.
 
 ## The question this answers
 
@@ -130,13 +131,19 @@ slot — a window is the unit the stability check compares, so a window with too
 makes the check meaningless:
 
 ```
-interval_ms ≳ (10 × concurrency) / requests_per_sec × 1000
+window_s   ≳ (10 × concurrency) / requests_per_sec
+interval_ms ≳ window_s / 1.2 × 1000        # a window is 1.2× the interval
 ```
 
-(An earlier version divided by 3, targeting 10 requests/slot summed across the three
-windows — i.e. ~3.3 per window. That is too thin for a per-window stability comparison. The
-worked examples below were computed with the old formula and are therefore ~3× smaller than
-this rule now asks for; they are left as the intervals actually used.)
+Worked: GLM-5.2 TP8 at c20, 0.54 req/s → window ≥ 370 s → interval ≥ 310 s.
+
+⚠️ **Every run published in this repo was sized with an earlier version of this formula**
+that divided by 3 (targeting 10 req/slot summed across three windows, ~3.3 per window) and
+ignored the 1.2× factor. Those runs sit at **4.3–6.5 requests/slot per window** — below what a
+per-window stability comparison needs, and one of the reasons their figures are reported as
+provisional. The worked examples in §"Third rig" and in
+[benchmark-commands.md](benchmark-commands.md) are the intervals actually used, kept for
+traceability, not the intervals this rule now asks for.
 
 Round up, and keep the interval well above one request's end-to-end latency or a window can
 close with almost nothing finished inside it.
@@ -226,28 +233,41 @@ closed-loop queue starts **empty** either way, and window 1 still contains the q
 transient. An earlier version of this document claimed a large warmup makes all three windows
 usable; that was wrong.
 
-⚠️ **Window count is not capped at three.** `stability_window` is 3
-(`inference_profiler.cc:522`), but `DetermineStability` uses it as a *rolling* window —
-`idx = infer_per_sec.size() - stability_window`, sliding forward as windows accumulate — so a
-run that does not satisfy the threshold keeps adding windows indefinitely. Three windows is
-the *minimum*, and what you get when the run stabilises immediately. An earlier version of
-this document said raising the interval "only widens" the windows and could not add any;
-that was wrong about the mechanism, though the practical consequence for an
-already-stabilising run is similar.
+⚠️ **Window count runs between 3 and `--max-trials` (default 10).** `stability_window` is 3
+(`inference_profiler.cc:522`) but `DetermineStability` uses it as a *rolling* window —
+`idx = infer_per_sec.size() - stability_window`, sliding forward as windows accumulate — so 3
+is the **minimum**, reached when the run stabilises immediately. The **maximum** is
+`max_trials_`: the collection loop is `while ((!early_exit) && (completed_trials <
+max_trials_))` (`inference_profiler.cc:811`), default `max_trials = 10`
+(`command_line_parser.h:66`). Exhausting it is not silent — perf_analyzer prints
+`Failed to obtain stable measurement within N measurement windows ... Please try to increase
+the --measurement-interval` and marks the run as not meeting the threshold
+(`inference_profiler.cc:573-585`). **Treat that message as a failed run, not a slow one.**
+(An earlier version of this document said raising the interval could not add windows, and a
+later one said windows accumulate "indefinitely" — both wrong.)
 
-**So plan for the transient rather than trying to avoid it:**
+**Define the trim rule before you look at the data.** Otherwise dropping "the windows that
+differ" is post-hoc window-picking. Fix all three of these in advance:
 
-1. **Report the per-window numbers and drop the windows that differ.** With the usual three
-   windows that means publishing windows 2–3 and saying stationarity rests on two. That is
-   what the figures above do.
-2. **If you need three settled windows, make the run longer than the minimum** — e.g. a
-   tighter `--stability-percentage`, so the early windows fail the check and more are
-   collected. This is a nudge, not a guarantee.
-3. **If window 1 differs materially and you have only three, say the run cannot demonstrate
-   steady state** and report it as such rather than publishing a percentile.
+- **Metric**: the one the comparison turns on (e.g. TTFT p50), plus throughput.
+- **Threshold**: reuse the tool's own criterion — `max/min ≤ 1 + stability_threshold` across
+  the retained windows, i.e. 10% at `--stability-percentage 10`.
+- **Contiguity**: retained windows must be the **trailing** run of windows; drop from the
+  front only, never from the middle.
+
+Procedure: compute the per-window metric, then drop leading windows one at a time until the
+remaining trailing set passes the threshold. Report how many you dropped and the per-window
+values, so the reader can see the rule was applied rather than the result chosen.
+
+**If nothing passes, the run failed** — say "did not reach steady state at C=x" rather than
+publishing a percentile. And note that with only 3 windows you can drop at most one before
+"stationarity" rests on two windows, which is weak; if that happens, prefer re-running with a
+longer interval (a longer window is more likely to contain the whole transient) over reporting
+the pair.
 
 These runs stabilised in the minimum three, with every request inside them (0 before the
-first boundary, 0 after the last), so option 1 is what the figures above reflect.
+first boundary, 0 after the last), so the trim above drops window 1 and reports the trailing
+two.
 
 ⚠️ **Filter on request *end*, not request start.** perf_analyzer attributes a request to
 the window it *finishes* in — `inference_profiler.cc`: `// Only counting requests that end
@@ -296,11 +316,12 @@ ISL/OSL 2000/256 pinned, thinking off.
 | TTFT p90 understatement at 2 requests/slot | ~1.4–1.5× | ❌ rig 2 overstated by 1.9–2.8× |
 | Throughput sensitivity to depth | ±5% (essentially none) | ❌ rig 3: overstated up to 53% |
 | Trend (c20→c40 TTFT p90) across all depths tested | +101% … +115% (stable) | ❌ rig 3: shallow exaggerates the throughput curve |
-| `N` chosen by runtime detection | 18 at c20, 12 at c40 | ✅ direction holds (rig 3: 23.3 → 14.7) |
+| Realised depth under stability detection | 18 req/slot at c20, 12 at c40 | ✅ direction holds (rig 3: 23.3 → 14.7) |
 
-**Only the first and last rows generalise.** `N` decreasing as concurrency rises is
-the one measured regularity reproduced on another rig — which is itself the reason a
-single fixed depth must not be reused across a concurrency sweep.
+**Only the first and last rows generalise.** Realised depth falling as concurrency rises is
+the one measured regularity reproduced on another rig. It is an *outcome* of the run, not a
+condition to equalise (Step 2) — its practical use is as a warning that a concurrency sweep
+does not sample each point equally deeply.
 
 Source-verified (not rig-specific): the `max(10, 2 × concurrency)` formula
 (`perf_analyzer_config.py::_calculate_request_count`); `--num-prompts` is an alias
@@ -445,7 +466,8 @@ both relative to the deeper value); cause not established.
       combines one pinned interval, window-boundary trimming to stationary windows, repeat
       runs with a spread or confidence interval, and each arm's trimmed sample size reported
       alongside
-- [ ] Confirm `N` calibrated on one model transfers to others in the same comparison
+- [ ] Confirm the *interval* calibrated on the slowest arm gives every other arm ≥10
+      req/slot per window — the only cross-arm quantity Step 1 actually sets
 - [x] A/B the two paths on the **same** hardware — **done on rig 3** (same node, same
       pool, same warmup, drained between runs). The earlier 22% gap attributed to node
       sizes (8 vs 16 vCPU) is better explained by **inter-run queue contamination**:
@@ -453,9 +475,9 @@ both relative to the deeper value); cause not established.
       (516 → 785 ms), larger than the depth effect itself
 - [ ] Confirm short-window bias does **not** invert relative ordering between models
       (no rig has shown a cross-concurrency inversion, but cross-model is untested)
-- [ ] Establish whether `N` must scale with ISL — rig 3 (8K) settled at 23.3 req/slot
-      at c20 vs rig 1 (2K) at 18, weakly consistent with deeper queues for longer
-      prefill, but the rigs differ in too many other ways to attribute it
+- [ ] Establish whether longer ISL needs a longer interval to settle — rig 3 (8K) realised
+      23.3 req/slot at c20 vs rig 1 (2K) at 18, weakly consistent with longer prefill taking
+      longer to settle, but the rigs differ in too many other ways to attribute it
 
 ## Known unexplained observation
 
