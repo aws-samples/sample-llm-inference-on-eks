@@ -127,9 +127,12 @@ that reuse would not raise the prefix-cache hit rate.
 | 256 | 1,969 ms | 1,987 ms | 13,166 ms | 69.26 ms | 14.9  | 3.64 | 4,634 |
 
 TTFT is time to first token; ITL is inter-token latency. Latency metrics are measured
-client-side. Total generation throughput is the steady-state median reported by the
-engine's own `log_stats` (18–64 samples per point, with `Reqs Running` matching the
-target concurrency).
+client-side. Total generation throughput is the **median of the engine's own `log_stats`
+samples taken while `Reqs Running` matched the target concurrency** (18–64 samples per
+point). ⚠️ That is an engine-side median over the loaded period, **not a steady-state
+figure**: `Reqs Running` reaching the target shows the queue is full, which is a
+prerequisite for settling but not evidence of it — throughput could still be drifting. No
+time-stability test was applied to these samples.
 
 ### 5.2 Prefill-heavy workload, 8000/1024
 
@@ -181,7 +184,7 @@ p75 is 1,836 tok/s and max 2,112 tok/s (108 samples). Concurrency 48 was not tes
 so the degradation boundary is not located.
 
 **Throughout that degradation, KV-cache usage peaked at 20.8% and the preemption count
-was 0.** `Reqs Waiting` stayed at 0 during steady state on every 1K point; on the 8K
+was 0.** `Reqs Waiting` stayed at 0 throughout the loaded period on every 1K point; on the 8K
 workload 9 samples showed queueing.
 
 **Concurrency 8 and concurrency 16 have essentially identical latency.** Their TTFT

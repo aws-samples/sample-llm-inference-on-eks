@@ -47,11 +47,15 @@ All runs use the same profile unless noted:
 > `--stability-percentage` to `999`, so nothing checked whether the queue had
 > settled, and nothing warned that it had not.
 >
-> The per-request distributions confirm it had not. At concurrency 20 (row L2) TTFT
-> climbs across the whole run — p10 840 ms, p25 878 ms, p50 2,458 ms, p75 10,062 ms,
-> p90 14,813 ms, max 17,624 ms — a 21× spread with no plateau: the queue was still
-> growing when the run ended. At concurrency 40 (row L3) the distribution flattens
-> (p50 1,230 ms, p75 1,541 ms, p90 1,542 ms, max 2,440 ms).
+> The distributions are very wide — at concurrency 20 (row L2) TTFT reads p10 840 ms,
+> p25 878 ms, p50 2,458 ms, p75 10,062 ms, p90 14,813 ms, max 17,624 ms, a 21× spread; at
+> concurrency 40 (row L3) it is much tighter (p50 1,230 ms, p75 1,541 ms, p90 1,542 ms,
+> max 2,440 ms). ⚠️ **Neither spread shows whether the queue had settled.** Percentiles are
+> sorted, so they always rise, and a stationary heavy-tailed series can be just as wide; only
+> per-window or time-ordered data can answer it, and none was retained for these runs. An
+> earlier version of this warning read the 21× spread as proof "the queue was still growing";
+> that inference is withdrawn. What does establish the defect is the depth itself — 2 requests
+> per concurrency slot — and the re-measurements in Open item 0.
 >
 > **Throughput and ITL are also affected, and at concurrency 40 severely.** A
 > deeper re-measurement of the TP8 shape (Open item 0, 2026-07-29) read
@@ -68,8 +72,10 @@ Six configurations were benchmarked across four deployment shapes. Key numbers (
 **Prefer the primed rows (L2′, L3′, P1′), but do not treat them as steady state
 either.** They were measured 10–20× deeper than the unprimed rows, which makes them much
 closer to the truth — but genai-perf computes its statistics over the *whole* run,
-ramp-up included, so they remain contaminated and biased **low on latency** (measured on a
-smaller rig: dropping the first, ramp-up window raises TTFT p50 by 5–19%). See
+ramp-up included, so they remain **contaminated by the transient — by an unknown amount and
+in an unknown direction**. (On a smaller rig, the only one whose window data survives,
+dropping the ramp-up window raised TTFT p50 by 5–19%; that direction does not carry over —
+the depth bias reverses sign between rigs.) See
 [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3. Every unprimed row was taken
 at 2–3 requests per concurrency slot: the struck-through TTFT columns are unusable and so
 are the rate columns (ITL, tok/s/user, total tok/s) — that defect was confirmed, not
@@ -553,12 +559,11 @@ that previously accompanied this sentence is dropped.)
    | TTFT p90 | 17,145 ms | **1,514 ms** |
    | Total tok/s | 456 | 552 |
 
-   So R4 **overstated** TTFT by ~3.7× (p50) and ~11× (p90) — the shallow window did
-   not flatter these numbers, it inflated them, consistent with this report's own
-   observation that the TTFT distribution ramped with no plateau (the queue grew
-   throughout the run). The deeper run's percentiles are tightly grouped (c20 p10 867 → p75 870 ms), which is
-   *consistent with* having settled but is **not evidence of it** — percentiles discard
-   request order, and per-window figures were not captured.
+   So R4 **overstated** TTFT by ~3.7× (p50) and ~11× (p90) — the shallow window did not
+   flatter these numbers, it inflated them. The deeper run's percentiles are also much more
+   tightly grouped (c20 p10 867 → p75 870 ms), but neither that nor R4's wide spread is
+   evidence about settling: percentiles carry no time information, and per-window figures
+   were not captured for either run.
 
    ⚠️ The re-measurement also **contradicted this report's assumption that "throughput
    and ITL are much less affected and remain usable"**: at c40, shallow measurement read
@@ -679,7 +684,8 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
 ```
 
 ⚠️ **This command alone does not produce a steady-state result.** genai-perf's printed
-summary aggregates every window, ramp-up included, so it is biased low on latency. Two
+summary aggregates every window, ramp-up included, so it is contaminated by the transient by
+an unknown amount. Two
 further steps are required and were **not** applied to any figure in this report:
 
 1. Keep `profile_export.json` and trim using its `window_boundaries` array — drop the

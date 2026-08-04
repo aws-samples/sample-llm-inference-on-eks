@@ -6,13 +6,18 @@
 > **Every number published from this methodology so far was computed over the whole run,
 > ramp-up included.** Step 3 explains why: `--stability-percentage` controls when
 > perf_analyzer stops, not what it reports, and GenAI-Perf aggregates every request in the
-> export. Measured on the L40S rig, dropping the first (ramp-up) window raises TTFT p50 by
-> 5–19%. So the existing figures in §"Measured basis", §"Second rig" and §"Third rig",
-> and every "steady state" number in
-> [GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md), are **closer to steady state than the
-> 2-requests-per-slot defaults but still contaminated, and biased low on latency.** They
-> are not the final word; re-deriving them from stationary windows only is tracked in
-> §"Validation checklist".
+> export. So the figures in §"Measured basis", §"Second rig" and §"Third rig", and every
+> figure in [GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md), are **deeper than the
+> 2-requests-per-slot defaults but still contaminated by the transient**.
+>
+> **The size and direction of that contamination is unknown for all but one rig.** On the
+> L40S rig — the only one whose per-request exports survive — dropping the ramp-up window
+> raised TTFT p50 by 5–19%, i.e. the whole-run value was biased *low*. **Do not carry that
+> direction over.** This document's own §"Second rig" and §"Third rig" show the depth bias
+> reversing sign between rigs and even between concurrency levels on the same rig, so for
+> GLM-5.2 and Kimi-K3 — where no window data was retained — the honest statement is that the
+> whole-run figures are contaminated **by an unknown amount, in an unknown direction**.
+> Re-deriving them from stationary windows is tracked in §"Validation checklist".
 
 > [!IMPORTANT]
 > **The numbers are not transferable between rigs.** Every *quantitative*
@@ -30,9 +35,9 @@
 > §"Measured basis", §"Second rig" and §"Third rig" as an observation from that rig, and
 > never assume a shallow run left some particular metric intact.
 >
-> What generalised across all three rigs: steady state is a validity precondition; a
-> **monotone ramp across percentiles** reliably indicates a run that never settled (the
-> converse does not hold — see Step 3). Note also that the depth a run *realises* under
+> What generalised across all three rigs: steady state is a validity precondition, and it can
+> only be evidenced with **per-window or time-ordered data** — percentiles cannot show it in
+> either direction (see Step 3). Note also that the depth a run *realises* under
 > stability detection falls as concurrency rises (23.3 req/slot at c20 vs 14.7 at c40 on rig
 > 3) — an observation about outcomes, not a target to match.
 >
@@ -256,16 +261,20 @@ differ" is post-hoc window-picking. Fix all three of these in advance:
   the retained windows, i.e. 10% at `--stability-percentage 10`.
 - **Contiguity**: retained windows must be the **trailing** run of windows; drop from the
   front only, never from the middle.
+- **Minimum retained**: **at least 2 windows, and prefer 3.** This is a hard constraint, not a
+  preference — with one window `max/min = 1` by construction, so a single window passes any
+  threshold vacuously and "the trim succeeded" would be meaningless.
 
-Procedure: compute the per-window metric, then drop leading windows one at a time until the
-remaining trailing set passes the threshold. Report how many you dropped and the per-window
-values, so the reader can see the rule was applied rather than the result chosen.
+Procedure: compute the per-window metric, then drop leading windows one at a time **while at
+least 2 remain**, stopping as soon as the trailing set passes the threshold. Report how many you
+dropped and the per-window values, so the reader can see the rule was applied rather than the
+result chosen.
 
-**If nothing passes, the run failed** — say "did not reach steady state at C=x" rather than
-publishing a percentile. And note that with only 3 windows you can drop at most one before
-"stationarity" rests on two windows, which is weak; if that happens, prefer re-running with a
-longer interval (a longer window is more likely to contain the whole transient) over reporting
-the pair.
+**If no trailing set of ≥2 windows passes, the run failed** — say "did not reach steady state
+at C=x" rather than publishing a percentile. Note that with the minimum 3 windows you can drop
+at most one before you are down to two, so a run that needs more trimming than that has to be
+re-run with a longer interval (a longer window is more likely to contain the whole transient)
+rather than trimmed further.
 
 These runs stabilised in the minimum three, with every request inside them (0 before the
 first boundary, 0 after the last), so the trim above drops window 1 and reports the trailing
@@ -281,12 +290,14 @@ Publish, for the trimmed subset: the **full TTFT distribution** (p1…max), the
 `Request Count`), and the number of
 windows run.
 
-⚠️ **Percentiles alone cannot show settling.** A wide spread is not proof the queue was
-growing, and a narrow one is not proof it had settled — percentiles discard request order,
-and a stable system under bursty arrivals can be wide. To evidence settling you need the
-*time* dimension: publish **per-window percentiles** (window 1, 2, 3 …) or a TTFT-vs-time
-scatter, and show the retained windows agree. An earlier version of this document
-claimed distribution shape alone was sufficient evidence; that was wrong.
+⚠️ **Percentiles cannot show settling, in either direction.** They are a sorted summary, so
+p10 ≤ p50 ≤ p90 always — a "monotone ramp" is arithmetic, not evidence, and a heavy-tailed but
+perfectly stationary series produces one too (a lognormal sample with no time trend by
+construction reads p10 0.24 → p90 3.93). Nor is a narrow spread proof of settling. **Only
+time-ordered data can answer this**: publish **per-window percentiles** (window 1, 2, 3 …) or
+a TTFT-vs-time scatter, and show the retained windows agree within the threshold. Earlier
+versions of this document claimed first that distribution shape *proves* settling and then
+that a monotone ramp *disproves* it; both are withdrawn.
 
 ⚠️ Recomputing by hand introduces its own comparability problem: genai-perf re-encodes
 output text with the tokenizer to count tokens, so **hand-derived throughput and ITL are
@@ -355,10 +366,11 @@ measured at the default 2 requests/slot.
 
 **Deepening the measurement *lowered* TTFT — the opposite of the L40S rig, where
 short windows understated it.** Reproduced independently at both concurrency levels.
-The distribution shape marks the shallow run as one that never settled (the converse does
-not follow — the deeper run is not thereby shown to be settled): at 12 req/slot the
-mid-to-upper percentiles plateau (c64: p50 1,175 → p90 1,278, a 9% spread), while at
-2 req/slot they climb monotonically with no plateau (p50 1,281 → p90 3,549, 177%).
+The two runs differ sharply in spread — at 12 req/slot the mid-to-upper percentiles sit close
+together (c64: p50 1,175 → p90 1,278, 9%) while at 2 req/slot they are far apart (p50 1,281 →
+p90 3,549, 177%). ⚠️ **That is not evidence about settling**: percentiles carry no time
+information, and a stationary heavy-tailed series can be just as wide. Per-window data was not
+retained for this rig, so neither run is shown to have settled.
 
 Plausible mechanism: at 2 req/slot the window is dominated by the initial burst, when
 all C requests arrive at once and contend for prefill. No steady pipeline exists yet,
@@ -368,10 +380,10 @@ startup transient is proportionally more severe than on a small dense model.
 
 **What survives and what does not:**
 
-- **Survives** — steady state is a validity precondition, and a monotone ramp across
-  percentiles marks a run that never settled. (This bullet previously also claimed "depth
-  must be fixed in requests/slot" and that distribution shape *proves* settling; both are
-  withdrawn — see §"Proposed resolution" and Step 3.)
+- **Survives** — steady state is a validity precondition. (This bullet previously also
+  claimed "depth must be fixed in requests/slot", that distribution shape *proves* settling,
+  and that a monotone percentile ramp *disproves* it; all three are withdrawn — see
+  §"Proposed resolution" and Step 3.)
 - **Does not survive** — the claim that short measurement biases *in favour of slow
   models* because it understates TTFT. The bias direction is rig-dependent.
   **Consequence: short-window results cannot be assumed conservative in either
@@ -412,12 +424,12 @@ c40** (1,070 shallow vs 698 deeper). This is the reverse of the L40S rig, where 
 Mechanism not established — no batch-occupancy or KV-utilisation telemetry was
 collected, so why the rate metrics are the depth-sensitive ones here is unmeasured.
 
-**Distribution shape again marked the shallow run as unsettled** — more cleanly than on either
-prior rig:
+The spreads differ here too, more sharply than on either prior rig — but again this says
+nothing about settling, for the reason in Step 3:
 
 ```
-c40 deeper  (589 req)  p10 887  p25 889  p50 892  p75 1640    <- tightly grouped
-c40 shallow  (80 req)  p10 328  p25 348  p50 723  p75  944    <- monotone ramp
+c40 deeper  (589 req)  p10 887  p25 889  p50 892  p75 1640
+c40 shallow  (80 req)  p10 328  p25 348  p50 723  p75  944
 ```
 
 **A second methodology error surfaced, unrelated to depth:** the first attempt ran the
@@ -433,11 +445,10 @@ the *most* depth-sensitive metric measured. Do not cite shallow-run throughput.
 **Re-validation of the original GLM-5.2 report:** the archived TP8 figures
 (`docs/GLM-5.2-BENCHMARK.md`, row R4: TTFT p50 3,202 ms / p90 17,145 ms, 456 tok/s)
 compare against the deeper whole-run values p50 869 ms / p90 1,514 ms / 552 tok/s — i.e. the
-original **overstated** TTFT by ~3.7× (p50) and ~11× (p90). That is the opposite
-direction from this document's original prediction, and consistent with the report's
-own observation that its TTFT distribution ramped with no plateau: the queue was
-growing throughout, which is a different failure from under-sampling. Throughput
-reproduced within ~21% across a different account/cluster.
+original **overstated** TTFT by ~3.7× (p50) and ~11× (p90) — the opposite direction from this
+document's original prediction. (An earlier version added that R4's wide percentile spread
+showed "the queue was growing throughout"; that inference is withdrawn — percentiles carry no
+time information.) Throughput reproduced within ~21% across a different account/cluster.
 
 **TP16 on the same rig (2026-07-30), 2× p5en, same tool and workload** — this is the
 measurement that resolves the c20-vs-c40 reversal described in §"Known unexplained
@@ -524,9 +535,10 @@ and workload, drained between runs.
 | c20 | 12,119 ms | **901 ms** (22.1 req/slot) |
 | c40 | 1,684 ms | **1,644 ms** (11.6 req/slot) |
 
-At 2 requests/slot c20 reads **7× worse than c40** — the anomaly reproduces. At steady
-state it is gone, and p90 rises with concurrency as expected. The original 14.8 s vs 1.5 s
-was a sampling artefact.
+At 2 requests/slot c20 reads **7× worse than c40** — the anomaly reproduces. In the deeper
+whole-run measurement it is gone, and p90 rises with concurrency as expected. The original
+14.8 s vs 1.5 s was a sampling artefact. (Both of these are whole-run values including
+ramp-up; no window data was retained for this rig.)
 
 **This corrects the two updates above.** Both concluded depth "cannot account for" the
 reversal, generalising from rigs (L40S, B300, and TP8 on H200) that simply do not exhibit

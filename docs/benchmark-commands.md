@@ -208,7 +208,10 @@ a period shorter than the window averages out inside it.
 > every ramp-up window.** `--stability-percentage` decides when perf_analyzer *stops*, not
 > what gets reported: it collects all windows, and GenAI-Perf then aggregates **all**
 > requests in the export. Measured on the L40S rig, dropping the first window raises TTFT
-> p50 by **5–19%** (c40 +5%, c20 +19%), so the printed summary is **biased low on latency**.
+> p50 by **5–19%** (c40 +5%, c20 +19%) — i.e. on *that* rig the printed summary was biased
+> low. ⚠️ **The direction does not generalise**: the depth bias reverses sign between rigs and
+> between concurrency levels (see the table above), so on an unmeasured rig treat the summary
+> as contaminated by an unknown amount in an unknown direction.
 >
 > **Do not publish the tool's summary as a steady-state result.** Trim it first:
 > [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 gives the procedure — filter on
