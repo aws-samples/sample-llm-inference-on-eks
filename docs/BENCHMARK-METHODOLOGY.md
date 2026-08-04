@@ -481,8 +481,8 @@ both relative to the deeper value); cause not established.
 - [x] Re-check the GLM-5.2 / H200 case now that the bias direction is known to vary —
       **done: §"Third rig". TTFT bias small; throughput bias large. TP8 only**
 - [x] Re-measure the **TP16** GLM-5.2 shape at greater depth — **done 2026-07-30 on
-      2× p5en; the c20-vs-c40 reversal reproduced at 2 req/slot and vanished at steady
-      state, so under-depth sampling does explain it on this shape**
+      2× p5en; the c20-vs-c40 reversal reproduced at 2 req/slot and vanished in the deeper
+      whole-run measurement, so under-depth sampling does explain it on this shape**
 - [ ] **Re-derive every published figure from stationary windows only** — all current
       numbers are whole-run averages including ramp-up (Step 3). Requires retaining
       `profile_export.json`, which was not done for the GLM-5.2 runs
