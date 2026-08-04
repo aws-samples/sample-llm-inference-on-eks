@@ -102,5 +102,5 @@ performance reference.
 | Priority class | `infra/priority-class.yaml` |
 | genai-perf client pod (Triton 26.06 SDK) | `genai-perf/genai-perf-triton-2606.yaml` |
 | Chat UI | `addons/open-webui.yaml` |
-| EFA image builds (SGLang) | `lws/Dockerfile.efa-*` (suffix = sglang version; `-nixl-` = adds NIXL for PD KV transfer) |
+| EFA image builds | `lws/Dockerfile.efa-*` (suffix = engine + version, e.g. `-sglang-0513`, `-vllm-kimi-k3`; `-nixl-` = adds NIXL for PD KV transfer) |
 | Benchmark command reference | [benchmark-commands.md](benchmark-commands.md) |

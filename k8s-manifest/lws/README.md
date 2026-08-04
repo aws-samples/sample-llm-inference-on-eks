@@ -1,6 +1,6 @@
 # Multi-Node Serving: LeaderWorkerSet + EFA
 
-SGLang across multiple P5/P5en nodes using
+SGLang and vLLM across multiple P5/P5en nodes using
 [LeaderWorkerSet](https://github.com/kubernetes-sigs/lws) (LWS), with GPU-to-GPU
 communication over AWS [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html).
 Two topologies:
@@ -22,12 +22,14 @@ PD architecture deep-dive: [PD_DISAGGREGATION.md](../../docs/PD_DISAGGREGATION.m
   [`infrastructure/terraform/`](../../infrastructure/terraform) — `enable_lws`)
 - EFA device plugin (`aws-efa-k8s-device-plugin`) — pods request
   `vpc.amazonaws.com/efa: 16`
-- An EFA-enabled SGLang image in your registry (below)
+- An EFA-enabled engine image in your registry — SGLang or vLLM (below)
 
 ## Images (`Dockerfile.efa-*`)
 
-Neither the stock `lmsysorg/sglang` nor the stock `vllm/vllm-openai` image has EFA
-userspace — cross-node NCCL would silently fall back to TCP over eth0. These
+Stock engine images ship no EFA userspace, so cross-node NCCL silently falls back to
+TCP over eth0. Verified for `lmsysorg/sglang` and for `vllm/vllm-openai:kimi-k3`
+(image config inspected 2026-07-31 — zero efa/libfabric/ofi hits); other vLLM tags were
+not checked, so verify yours rather than assuming either way. These
 Dockerfiles add libfabric/EFA and the aws-ofi-nccl plugin on top of pinned engine
 versions. Naming: `Dockerfile.efa[-nixl]-<engine>-<version>`; `-nixl-` variants
 add NIXL for PD KV transfer.
@@ -107,8 +109,12 @@ How each engine wires the group across nodes:
 
 vLLM's multi-node mode differs from SGLang's in two ways that matter for the
 manifest: the rendezvous port defaults to **29501** (`vllm/config/parallel.py`),
-and the `--headless` worker starts **no API server** — so worker probes must be
-`tcpSocket`-only, and only the leader can back the Service.
+and the `--headless` worker starts **no API server** and no listener at all — it
+dials *out* to the leader. So the worker gets **no probes of any kind** (a
+`tcpSocket` probe would fail on a healthy pod), only the leader backs the Service,
+and worker liveness is handled at the group level by
+`restartPolicy: RecreateGroupOnPodRestart` — required because vLLM's TCPStore
+rendezvous cannot re-join a restarted rank.
 
 ### Memory (hard-won)
 
@@ -153,7 +159,7 @@ channels is benign.
 | Symptom | Check |
 |---|---|
 | Pods Pending, `Insufficient vpc.amazonaws.com/efa` | EFA device plugin DaemonSet running (`kubectl get ds -n kube-system aws-efa-k8s-device-plugin`)? Node actually p5/p5en? |
-| NCCL falls back to `NET/Socket` | Image built with aws-ofi-nccl? `NCCL_NET_PLUGIN=ofi` set? `/dev/infiniband` mounted? |
+| NCCL falls back to `NET/Socket` | Image built with aws-ofi-nccl? `NCCL_NET_PLUGIN=ofi` set? `/dev/infiniband` devices **visible** in the pod (`ls /dev/infiniband/`)? They are injected by the device plugin when the pod requests `vpc.amazonaws.com/efa` — do **not** add a hostPath to "fix" a missing mount. |
 | Decode pods Pending with `zone DoesNotExist` (PD) | Normal while prefill is still binding — scheduler retries after prefill lands |
 | OOM under load | `--mem-fraction-static` too high — see Memory above |
 | NIXL / KV-transfer errors (PD) | `fi_info -p efa` inside the pod; `kubectl logs <pod> \| grep -i nixl` |

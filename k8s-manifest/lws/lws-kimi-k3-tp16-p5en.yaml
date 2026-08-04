@@ -98,7 +98,8 @@ spec:
             - --gpu-memory-utilization=0.97
             - --max-num-seqs=5
             # 29696, NOT the recipe's 32768. Measured on this rig 2026-08-03:
-            # weights alone are 129.75 GiB/GPU of the H200's 143.77 GiB, leaving
+            # weights alone are 129.75 GiB/GPU of the H200's ~140.4 GiB usable
+            # (141 GB spec; nvidia-smi reports 143,771 MiB), leaving
             # only 0.82 GiB for KV cache after activations — but 32768 needs
             # 0.88 GiB, so the engine refused to start (reproducibly, 3 rounds):
             #   ValueError: ... 0.88 GiB KV cache is needed, which is larger than
@@ -224,7 +225,8 @@ spec:
           # Same args as the leader except the last two: --node-rank comes from
           # LWS's worker index, and --headless makes this an engine-only worker.
           # A headless worker starts NO API server, so it has no /health endpoint
-          # — its probes must stay tcpSocket-only (see below).
+          # and no listener at all — it dials *out* to the leader. It therefore
+          # gets no probes of any kind (see below).
           args:
             - moonshotai/Kimi-K3
             - --host=0.0.0.0
@@ -281,10 +283,14 @@ spec:
             - name: dist
               containerPort: 29501
           resources: *common-resources
-          # No HTTP probes on the worker — headless mode starts no API server.
-          # The worker connects *out* to the leader's 29501, so there is nothing
-          # to probe here that proves readiness; LWS restarts the whole group on
-          # failure (restartPolicy: None) and the leader's probes gate the Service.
+          # No probes on the worker at all — not even tcpSocket. Headless mode
+          # starts no API server (nothing on 8000) and the worker *initiates* the
+          # connection to the leader's 29501 rather than listening on it, so any
+          # probe would fail on a healthy pod. Liveness is handled at the group
+          # level instead: if the worker container exits, restartPolicy
+          # RecreateGroupOnPodRestart (see leaderWorkerTemplate above) rebuilds
+          # leader and worker together, which is required because vLLM's TCPStore
+          # rendezvous has no re-join path. The leader's own probes gate the Service.
           volumeMounts: *common-volume-mounts
           securityContext: *common-security-context
         volumes: *common-volumes
