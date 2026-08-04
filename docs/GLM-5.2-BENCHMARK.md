@@ -562,7 +562,7 @@ that previously accompanied this sentence is dropped.)
 
    ⚠️ The re-measurement also **contradicted this report's assumption that "throughput
    and ITL are much less affected and remain usable"**: at c40, shallow measurement read
-   throughput 1,070 tok/s vs 698 steady and ITL 27.4 ms vs 54.5. On this rig throughput
+   throughput 1,070 tok/s vs 698 at the deeper depth, and ITL 27.4 ms vs 54.5. On this rig throughput
    was the *most* depth-sensitive metric measured; the mechanism was not investigated.
    The c40 rows of this report should be treated as unusable in full, not just their
    TTFT. See [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md)

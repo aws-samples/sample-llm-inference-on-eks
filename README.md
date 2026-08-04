@@ -265,10 +265,11 @@ Condensed from the benchmark writeups — details in [docs/](docs/):
 
 - **`--mem-fraction-static` 0.80 is the safe line** for SGLang under heavy
   8K-input load on H200, single- and multi-node; 0.85 OOM-crashed both shapes.
-- **Whether multi-node TP pays off is unresolved** — TP16 read slower than TP8 at
-  c20/c40 on 8K/1K, but every such comparison so far ran the two arms at
-  different measurement depths, so the gap is not established. Do not assume a
-  second node buys throughput or latency on this workload; measure it.
+- **Whether multi-node TP pays off is unresolved** — TP16 read 5–6% slower than
+  TP8 at c20/c40 on 8K/1K, but every such comparison is a **single run with no
+  variance estimate** and includes ramp-up, so a gap that size is not resolvable
+  from it in either direction. Do not assume a second node buys throughput or
+  latency on this workload; measure it, with repeats.
   ([docs/GLM-5.2-BENCHMARK.md](docs/GLM-5.2-BENCHMARK.md) Finding 5.)
 - **PD disaggregation is not characterised yet** — earlier writeups concluded
   1P:1D loses on prefill-heavy traffic because the prefill node bottlenecks while

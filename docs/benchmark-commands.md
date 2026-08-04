@@ -138,7 +138,7 @@ assume.** Measured A/Bs (2 requests/slot vs runtime-detected depth):
 | H200, GLM-5.2-FP8 MoE, 8K/1K | understated only 1.1–1.2× (p50) | **overstated up to 53%** |
 
 On the H200/MoE rig throughput was the *most* depth-sensitive metric (c40: 1,070 tok/s
-shallow vs 698 steady), with ITL moving alongside it (27.4 → 54.5 ms). So the advice
+shallow vs 698 deeper), with ITL moving alongside it (27.4 → 54.5 ms). So the advice
 that "throughput survives, only latency is unusable" holds on the L40S/dense rig and
 fails here. Treat the whole shallow run as unusable rather than trying to identify which
 metric escaped. Full data:
@@ -164,12 +164,13 @@ Aim for at least 10 requests per concurrency slot **in each window** (the window
 the stability check compares):
 
 ```
-interval_ms ≳ (10 × concurrency) / requests_per_sec × 1000
+window_s    ≳ (10 × concurrency) / requests_per_sec
+interval_ms ≳ window_s / 1.2 × 1000        # a window is 1.2× the interval
 ```
 
-⚠️ The worked examples below were computed with an earlier formula that divided by 3 (i.e.
-~3.3 requests/slot per window), so they are ~3× smaller than this rule now asks for. They are
-the intervals actually used for the runs in this repo, kept for traceability.
+⚠️ The `/ 1.2` matters: a measurement window is always 1.2× the interval you pass
+(`inference_profiler.cc:1229-1230`), so sizing the interval as if it were the window
+over-shoots by 20%.
 
 Get `requests_per_sec` from a short throwaway run (it is in the report as *Request
 Throughput*), then round up. Two worked examples, same tooling, three orders of
@@ -181,10 +182,16 @@ magnitude apart in workload:
 | GLM-5.2 MoE TP8, 8K-in/1K-out, c20 | ~0.54 /s | ~310 s | 180 s (5.8 req/slot) |
 | GLM-5.2 MoE TP8, 8K-in/1K-out, c40 | ~0.80 /s | ~420 s | 180 s (4.3 req/slot) |
 
-⚠️ **Every run published in this repo used the right-hand column**, and all of them fall
-below the ≥10 req/slot/window this rule asks for — they were sized with an earlier formula
-that divided by 3. Use the third column for new runs; the fourth is kept so the published
-figures can be traced. (Window = 1.2 × interval, so the depth is `interval × 1.2 × rps ÷ C`.)
+⚠️ **The three stability-detected runs in this table all fall below the ≥10 req/slot/window
+this rule asks for** — they were sized with an earlier formula that divided by 3 and ignored
+the 1.2× factor. Use the third column for new runs; the fourth is kept so the published
+figures can be traced. (Depth = `interval × 1.2 × rps ÷ C`.)
+
+Other runs in this repo sit elsewhere and are not covered by this table: the original
+2026-07-07/08 campaigns ran at genai-perf's default **2 req/slot**, and the Kimi-K3 sweep
+used `--request-count` for a fixed **12 req/slot in a single window** (which is why its
+figures cannot be window-trimmed at all — see
+[KIMI-K3-B300-PERFORMANCE.md](KIMI-K3-B300-PERFORMANCE.md)).
 
 Also keep the interval well above a single request's end-to-end latency, or a window
 can close with almost nothing completed inside it.

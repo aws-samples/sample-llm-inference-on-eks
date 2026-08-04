@@ -92,14 +92,15 @@ measured as null in responses. Measured input length landed at 1023.97–1024.00
 > These are therefore **fixed-depth whole-run averages, not steady-state measurements**,
 > and on another rig the same class of contamination biased TTFT p50 low by 5–19%.
 >
-> **Sharing one depth across the sweep does not make the sweep self-consistent.** The
-> depth a run *needs* to settle falls as concurrency rises (measured elsewhere: 23.3
-> requests/slot at c20 vs 14.7 at c40), so a single `12 × concurrency` reused at 1/8/16/32/64
-> is not equally deep relative to each point's requirement — it is likely too shallow at the
-> low-concurrency end and adequate at the high end. Conclusions that compare *across*
-> concurrency points — the efficiency knee, the shape of the throughput curve — inherit that
-> unevenness on top of the ramp-up contamination above, and should be treated as
-> provisional. The per-point numbers are left as measured. Current procedure:
+> **The cross-concurrency conclusions are provisional for a different reason.** Not because
+> the points differ in realised depth — under a closed-loop generator that is an outcome, not
+> a confound — but because **none of these points excludes ramp-up**. With a single window per
+> point there is no stationary subset to isolate, so each figure blends the queue-filling
+> transient with the settled state, and the *proportion* of the window spent in the transient
+> varies with concurrency (a deeper queue takes longer to fill). Conclusions that compare
+> *across* points — the efficiency knee, the shape of the throughput curve — are therefore
+> affected unevenly and should be treated as provisional. Each point is also n=1 with no
+> variance estimate. The per-point numbers are left as measured. Current procedure:
 > [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md).
 
 Measurement depth was fixed at one common value across points: runtime stability detection was

@@ -137,11 +137,13 @@ interval_ms ≳ window_s / 1.2 × 1000        # a window is 1.2× the interval
 
 Worked: GLM-5.2 TP8 at c20, 0.54 req/s → window ≥ 370 s → interval ≥ 310 s.
 
-⚠️ **Every run published in this repo was sized with an earlier version of this formula**
-that divided by 3 (targeting 10 req/slot summed across three windows, ~3.3 per window) and
-ignored the 1.2× factor. Those runs sit at **4.3–6.5 requests/slot per window** — below what a
-per-window stability comparison needs, and one of the reasons their figures are reported as
-provisional. The worked examples in §"Third rig" and in
+⚠️ **The stability-detected runs published in this repo were sized with an earlier version of
+this formula** that divided by 3 (targeting 10 req/slot summed across three windows, ~3.3 per
+window) and ignored the 1.2× factor. Those runs sit at **4.3–6.5 requests/slot per window** —
+below what a per-window stability comparison needs, and one of the reasons their figures are
+reported as provisional. Two other groups sit outside that range: the original GLM-5.2
+campaigns ran at the default **2 req/slot**, and the Kimi-K3 sweep pinned **12 req/slot in a
+single window** via `--request-count`, which cannot be window-trimmed at all. The worked examples in §"Third rig" and in
 [benchmark-commands.md](benchmark-commands.md) are the intervals actually used, kept for
 traceability, not the intervals this rule now asks for.
 
@@ -295,14 +297,24 @@ computed the same way either method).
 run's backlog; on rig 3 that contamination exceeded the depth effect being measured
 (§"Third rig"). Gate on GPU utilisation returning to ~0 before each run.
 
-## When a model never converges
+## When a run never converges
 
-If `N` is insufficient for some model — the queue keeps growing regardless — that is
-**a result, not a measurement failure**: the model cannot serve that concurrency.
-Report "did not reach steady state at C=x" rather than publishing a percentile.
+If the windows never satisfy the stability threshold — perf_analyzer exhausts
+`--max-trials` and prints `Failed to obtain stable measurement within N measurement
+windows` — report **"did not reach steady state at C=x"** rather than publishing a
+percentile.
 
-Raising `N` costs machine time. Lowering it costs correctness. The asymmetry favours
-raising it.
+⚠️ **That is a statement about the measurement, not about the deployment.** Under a
+closed-loop generator, concurrency caps in-flight requests, so a non-converging run does
+**not** show "the model cannot serve that concurrency" — it shows the run did not
+demonstrate a settled state within the windows collected. An earlier version of this
+document drew the stronger conclusion; it does not follow. The usual causes are a window
+too short to contain the transient, or genuine non-stationarity in the workload or server
+(cache filling, background load, thermal drift) — none of which is a capacity verdict.
+
+First response: **lengthen the interval** so each window contains more of the transient,
+and re-run. A longer window costs machine time; publishing an unsettled percentile costs
+correctness, so the asymmetry favours the longer window.
 
 ## Measured basis (single rig — this is the weakness)
 
@@ -343,7 +355,8 @@ measured at the default 2 requests/slot.
 
 **Deepening the measurement *lowered* TTFT — the opposite of the L40S rig, where
 short windows understated it.** Reproduced independently at both concurrency levels.
-The distribution shape identifies the deeper run as the valid one: at 12 req/slot the
+The distribution shape marks the shallow run as one that never settled (the converse does
+not follow — the deeper run is not thereby shown to be settled): at 12 req/slot the
 mid-to-upper percentiles plateau (c64: p50 1,175 → p90 1,278, a 9% spread), while at
 2 req/slot they climb monotonically with no plateau (p50 1,281 → p90 3,549, 177%).
 
@@ -399,11 +412,11 @@ c40** (1,070 shallow vs 698 deeper). This is the reverse of the L40S rig, where 
 Mechanism not established — no batch-occupancy or KV-utilisation telemetry was
 collected, so why the rate metrics are the depth-sensitive ones here is unmeasured.
 
-**Distribution shape again identified the valid run**, and more cleanly than on either
+**Distribution shape again marked the shallow run as unsettled** — more cleanly than on either
 prior rig:
 
 ```
-c40 steady  (589 req)  p10 887  p25 889  p50 892  p75 1640    <- plateau
+c40 deeper  (589 req)  p10 887  p25 889  p50 892  p75 1640    <- tightly grouped
 c40 shallow  (80 req)  p10 328  p25 348  p50 723  p75  944    <- monotone ramp
 ```
 
