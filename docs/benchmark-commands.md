@@ -3,7 +3,7 @@
 **Use genai-perf** — it is the tool of record for every benchmark in this repo.
 Jump to [genai-perf 0.0.16+](#genai-perf-0016-triton-sdk-2606-genai-perfgenai-perf-triton-2606yaml--current)
 and read [Measuring steady state](#measuring-steady-state) before your first run;
-the defaults produce optimistic latency numbers. The engine-native harnesses at the
+the defaults do not measure steady state. The engine-native harnesses at the
 bottom (`sglang.bench_serving`, `vllm bench serve`) are listed for reference only —
 they define concurrency and latency differently, so results are **not comparable**
 with genai-perf's or with each other. Do not mix tools within one comparison.
@@ -65,7 +65,7 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --url glm-5-2.default.svc.cluster.local:80 \
   --endpoint-type chat --streaming \
   --concurrency 20 \
-  --measurement-interval 180000 \
+  --measurement-interval 310000 \
   --stability-percentage 10 \
   --warmup-request-count 20 \
   --num-prompts 2000 \
@@ -77,16 +77,36 @@ genai-perf profile -m zai-org/GLM-5.2-FP8 \
   --extra-inputs '{"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
-Set `--warmup-request-count` to the concurrency value (one warm request per slot;
-warmup records are discarded by perf_analyzer and never enter the report). The
-`180000` above is derived for *this* workload — see
-[Measuring steady state](#measuring-steady-state) for how to size it for yours.
+Set `--warmup-request-count` to the concurrency value (one warm request per slot; warmup
+records are discarded by perf_analyzer and never enter the report).
+
+The `310000` is derived for *this* workload and **must be recomputed for yours** — see
+[Measuring steady state](#measuring-steady-state). Derivation: GLM-5.2 TP8 at c20 sustains
+~0.54 req/s, so a window needs `(10 × 20) / 0.54 ≈ 370 s`, and a window is 1.2× the interval
+→ `370 / 1.2 ≈ 310 s`. ⚠️ The runs recorded in
+[GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md) used `180000`, which at that rate gives only
+**5.8 requests/slot per window** — below the ≥10 the stability comparison needs. That is one
+of the reasons those figures are reported as provisional.
 
 Known issue: at concurrency ≥40 against the sglang-router (PD setups), the SSE
-parser intermittently fails (`splintered SSE response` / `orjson.JSONDecodeError`)
-even though the backend is healthy. This is the one case where a fallback is
-justified — but a run switched to `sglang.bench_serving` cannot be compared against
-genai-perf runs, so switch the *whole* comparison or none of it.
+parser fails (`splintered SSE response` / `orjson.JSONDecodeError`) even though the
+backend is healthy. Quantified 2026-07-31 on GLM-5.2 PD at c40: of 850,089 response
+chunks, **72 (0.0085%) arrive truncated**, and 96% of those parse cleanly once joined
+with the following chunk — SSE frames split across reads, with no client-side
+reassembly. One bad frame aborts the whole run, so a completed 20-minute profile
+produces **no `profile_export_genai_perf.json` at all**. Reproduced twice; the router
+logged zero errors, so which side splits the frames is not established.
+
+Do **not** substitute another load generator to get past this — cross-tool numbers are
+not comparable and silently corrupt the comparison they enter (this is how row P2 of
+[GLM-5.2-BENCHMARK.md](GLM-5.2-BENCHMARK.md) became permanently unusable). Report the
+point as **"not measurable with genai-perf"**. Two things that do help: capture stderr
+(never wrap the profile call in `>/dev/null 2>&1`, or the failure looks like a missing
+file with no cause), and note that `profile_export.json` — the raw per-request records
+— *is* still written, so latency percentiles can be recomputed by hand. ⚠️ Hand-derived
+figures are not comparable to genai-perf's own: the tool re-encodes output text with
+the tokenizer, whereas counting SSE chunks miscounts tokens whenever MTP/speculative
+decoding emits several per chunk. Keep them in a separate, clearly labelled table.
 
 ## Measuring steady state
 
@@ -108,9 +128,26 @@ hardware. Three facts drive this:
    default is `10`), which makes the stability check pass unconditionally. Nothing
    warns you that the run never stabilised.
 
-Latency read this way is optimistic by roughly an order of magnitude, and the error
-grows with concurrency. Throughput is much less affected, and *trends* across
-concurrency levels survive — it is the absolute latency figures that are unusable.
+**Numbers read this way are invalid, but which metric is wrong varies by rig — do not
+assume.** Measured A/Bs (2 requests/slot vs runtime-detected depth):
+
+| Rig | TTFT error | Throughput error |
+|---|---|---|
+| L40S, Qwen3-8B dense, 2K/256 | understated 6–14× (p50) | ±5% (none) |
+| B300, Kimi-K3 2.8T MoE, 1K/1K | **over**stated 1.9–2.8× (p90) | not isolated |
+| H200, GLM-5.2-FP8 MoE, 8K/1K | understated only 1.1–1.2× (p50) | **overstated up to 53%** |
+
+On the H200/MoE rig throughput was the *most* depth-sensitive metric (c40: 1,070 tok/s
+shallow vs 698 deeper), with ITL moving alongside it (27.4 → 54.5 ms). So the advice
+that "throughput survives, only latency is unusable" holds on the L40S/dense rig and
+fails here. Treat the whole shallow run as unusable rather than trying to identify which
+metric escaped. Full data:
+[BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md).
+
+**Drain the server to idle between runs.** Back-to-back runs inherit the previous run's
+queue backlog; on the H200 rig that changed an identical shallow c20 command by 34% on
+TTFT p50 (516 ms undrained vs 785 ms drained) — larger than the depth effect under
+study. Gate on `nvidia-smi` utilisation returning to ~0.
 
 Use time-window mode with a real stability threshold instead of the default
 request-count mode (the two are mutually exclusive):
@@ -123,20 +160,38 @@ perf_analyzer then repeats measurement windows until the max/min ratio across th
 most recent 3 windows is within the threshold for both throughput and latency.
 
 **Size the interval from measured request throughput — do not copy a constant.**
-Aim for at least 10 requests per concurrency slot across the 3 windows:
+Aim for at least 10 requests per concurrency slot **in each window** (the window is the unit
+the stability check compares):
 
 ```
-interval_ms ≳ (10 × concurrency) / (3 × requests_per_sec) × 1000
+window_s    ≳ (10 × concurrency) / requests_per_sec
+interval_ms ≳ window_s / 1.2 × 1000        # a window is 1.2× the interval
 ```
+
+⚠️ The `/ 1.2` matters: a measurement window is always 1.2× the interval you pass
+(`inference_profiler.cc:1229-1230`), so sizing the interval as if it were the window
+over-shoots by 20%.
 
 Get `requests_per_sec` from a short throwaway run (it is in the report as *Request
 Throughput*), then round up. Two worked examples, same tooling, three orders of
 magnitude apart in workload:
 
-| Workload | Request throughput | Interval |
-|---|---|---|
-| 8B model, 2K-in/256-out, c20 | ~1.8 /s | 60 s |
-| 753B MoE, 8K-in/1K-out, c20 | ~0.39 /s | 180 s |
+| Workload | Request throughput | This rule requires | Actually used (per-window depth) |
+|---|---|---|---|
+| 8B model, 2K-in/256-out, c20 | ~1.8 /s | ~95 s | 60 s (6.5 req/slot) |
+| GLM-5.2 MoE TP8, 8K-in/1K-out, c20 | ~0.54 /s | ~310 s | 180 s (5.8 req/slot) |
+| GLM-5.2 MoE TP8, 8K-in/1K-out, c40 | ~0.80 /s | ~420 s | 180 s (4.3 req/slot) |
+
+⚠️ **The three stability-detected runs in this table all fall below the ≥10 req/slot/window
+this rule asks for** — they were sized with an earlier formula that divided by 3 and ignored
+the 1.2× factor. Use the third column for new runs; the fourth is kept so the published
+figures can be traced. (Depth = `interval × 1.2 × rps ÷ C`.)
+
+Other runs in this repo sit elsewhere and are not covered by this table: the original
+2026-07-07/08 campaigns ran at genai-perf's default **2 req/slot**, and the Kimi-K3 sweep
+used `--request-count` for a fixed **12 req/slot in a single window** (which is why its
+figures cannot be window-trimmed at all — see
+[KIMI-K3-B300-PERFORMANCE.md](KIMI-K3-B300-PERFORMANCE.md)).
 
 Also keep the interval well above a single request's end-to-end latency, or a window
 can close with almost nothing completed inside it.
@@ -146,9 +201,39 @@ is smaller, prompts get reused, prefix-cache hit rate climbs mid-run, and TTFT
 drifts downward — a self-inflicted trend.
 
 The stability check compares whole windows against each other, so fluctuation with
-a period shorter than the window averages out inside it. Report **p50, p90 and p99**
-together rather than a single number. A p50 that improves as concurrency rises is a
-methodology red flag, not a result.
+a period shorter than the window averages out inside it.
+
+> [!CAUTION]
+> **The numbers genai-perf prints at the end of a stability-detected run still include
+> every ramp-up window.** `--stability-percentage` decides when perf_analyzer *stops*, not
+> what gets reported: it collects all windows, and GenAI-Perf then aggregates **all**
+> requests in the export. Measured on the L40S rig, dropping the first window raises TTFT
+> p50 by **5–19%** (c40 +5%, c20 +19%) — i.e. on *that* rig the printed summary was biased
+> low. ⚠️ **The direction does not generalise**: the depth bias reverses sign between rigs and
+> between concurrency levels (see the table above), so on an unmeasured rig treat the summary
+> as contaminated by an unknown amount in an unknown direction.
+>
+> **Do not publish the tool's summary as a steady-state result.** Trim it first:
+> [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md) Step 3 gives the procedure — filter on
+> the `window_boundaries` array in `profile_export.json`, keeping requests whose *last
+> response* falls in the windows you retain. Do **not** slice on `3 × interval`: a window
+> is always 1.2× the configured interval (`Measure()` sleeps for `measurement_window * 1.2`,
+> `inference_profiler.cc:1229-1230`), so that cuts into the windows you meant to keep.
+> And do **not** reach for `--request-count` to pin depth — it collapses the run to a single
+> window, which cannot be trimmed at all (Step 2).
+>
+> Note three windows is the *minimum*, not a cap (`stability_window` is a rolling window), and
+> `--warmup-request-count` will **not** hand you a warm queue — perf_analyzer drains and
+> clears its workers after warmup, so window 1 always contains the queue-filling transient.
+> Plan to drop it: publish per-window numbers and report which windows you retained.
+
+When you report, give the **full TTFT distribution** (p1…max) for the trimmed subset, the
+interval, **per-window percentiles** (whole-run percentiles discard request order and cannot
+show whether the queue settled), and the **trimmed sample size ÷ concurrency** — not
+GenAI-Perf's `Request Count`, which spans the whole run and so describes a different
+population than the figures you publish. Sample sizes will differ between arms; that costs
+precision, not validity, so repeat runs and publish the spread. A p50 that improves as
+concurrency rises is a methodology red flag, not a result.
 
 ---
 

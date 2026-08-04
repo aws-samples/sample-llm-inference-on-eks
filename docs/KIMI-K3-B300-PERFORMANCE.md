@@ -76,7 +76,34 @@ Both shapes were chosen for this test. Output length was pinned via
 measured as null in responses. Measured input length landed at 1023.97–1024.00
 (per-point averages), matching the setting.
 
-Measurement depth was fixed on a steady-state basis: runtime stability detection was
+> [!CAUTION]
+> **The depth procedure described below does not yield steady-state values** — corrected
+> 2026-08-03, after the method was re-examined against the perf_analyzer source. Two
+> defects, both affecting every figure in this document:
+>
+> - **`--request-count` collapses the run to a single measurement window**
+>   (`inference_profiler.cc`: `// If request-count is specified, then only measure one
+>   window and exit`), so the points below cannot have ramp-up excluded — the depth is
+>   pinned, but the window structure needed to trim ramp-up is gone.
+> - Even the calibration run at c64 reports over **all** its windows, ramp-up included,
+>   because `--stability-percentage` controls when perf_analyzer stops, not what it
+>   reports.
+>
+> These are therefore **fixed-depth whole-run averages, not steady-state measurements**,
+> and on another rig the same class of contamination biased TTFT p50 low by 5–19%.
+>
+> **The cross-concurrency conclusions are provisional for a different reason.** Not because
+> the points differ in realised depth — under a closed-loop generator that is an outcome, not
+> a confound — but because **none of these points excludes ramp-up**. With a single window per
+> point there is no stationary subset to isolate, so each figure blends the queue-filling
+> transient with the settled state, and the *proportion* of the window spent in the transient
+> varies with concurrency (a deeper queue takes longer to fill). Conclusions that compare
+> *across* points — the efficiency knee, the shape of the throughput curve — are therefore
+> affected unevenly and should be treated as provisional. Each point is also n=1 with no
+> variance estimate. The per-point numbers are left as measured. Current procedure:
+> [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md).
+
+Measurement depth was fixed at one common value across points: runtime stability detection was
 first enabled on the deepest queue (concurrency 64) using
 `--measurement-interval 120000 --stability-percentage 10`, yielding an observed
 `Request Count` of 768, i.e. 12 requests per concurrency slot. All other points used
@@ -100,9 +127,12 @@ that reuse would not raise the prefix-cache hit rate.
 | 256 | 1,969 ms | 1,987 ms | 13,166 ms | 69.26 ms | 14.9  | 3.64 | 4,634 |
 
 TTFT is time to first token; ITL is inter-token latency. Latency metrics are measured
-client-side. Total generation throughput is the steady-state median reported by the
-engine's own `log_stats` (18–64 samples per point, with `Reqs Running` matching the
-target concurrency).
+client-side. Total generation throughput is the **median of the engine's own `log_stats`
+samples taken while `Reqs Running` matched the target concurrency** (18–64 samples per
+point). ⚠️ That is an engine-side median over the loaded period, **not a steady-state
+figure**: `Reqs Running` reaching the target shows the queue is full, which is a
+prerequisite for settling but not evidence of it — throughput could still be drifting. No
+time-stability test was applied to these samples.
 
 ### 5.2 Prefill-heavy workload, 8000/1024
 
@@ -154,7 +184,7 @@ p75 is 1,836 tok/s and max 2,112 tok/s (108 samples). Concurrency 48 was not tes
 so the degradation boundary is not located.
 
 **Throughout that degradation, KV-cache usage peaked at 20.8% and the preemption count
-was 0.** `Reqs Waiting` stayed at 0 during steady state on every 1K point; on the 8K
+was 0.** `Reqs Waiting` stayed at 0 throughout the loaded period on every 1K point; on the 8K
 workload 9 samples showed queueing.
 
 **Concurrency 8 and concurrency 16 have essentially identical latency.** Their TTFT
