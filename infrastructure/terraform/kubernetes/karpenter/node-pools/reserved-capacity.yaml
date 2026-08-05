@@ -21,7 +21,7 @@ spec:
       requirements:
       - key: "karpenter.sh/capacity-type"
         operator: In
-        values: [ "reserved", "on-demand" ]
+        values: [ "reserved" ]
       - key: "karpenter.k8s.aws/instance-family"
         operator: In
         values: [ "p4", "p4d", "p4de", "p5", "p5en", "p6-b200", "p6-b300" ]
