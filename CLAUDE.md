@@ -4,6 +4,35 @@ Guidance for AI assistants (and humans) working in this repo. Personal
 environment values (account ID, region, capacity details) live in the
 git-ignored `CLAUDE.local.md` — never in committed files.
 
+## Never Attribute Without Evidence (applies everywhere, not just to reports)
+
+This repo exists to produce performance numbers people will act on. A confident
+wrong explanation is worse than no explanation, because it sends the next person
+to tune the wrong thing. So:
+
+- **No causal claim without evidence you actually have in hand.** Not a plausible
+  mechanism, not "this usually means X" — a log line, a controlled A/B, a config
+  dump, a profile. If you don't have it, say "cause not established" and, if it
+  matters, go get it.
+- **A suspicious number is a stop sign, not a footnote.** If a figure contradicts
+  another figure, defies the expected order of magnitude, or lands suspiciously
+  round, investigate before reporting or building on it. Do not average it away,
+  do not explain it away.
+- **Never state a source, version, upstream recommendation, or default from
+  memory.** Read the file, hit the endpoint, check the log. Cite where it came
+  from so it can be re-checked.
+- **Separate what was measured from what it means.** Observation, inference and
+  guess get different words. "Cache hit rate was 0.0%" is an observation;
+  "LMCache didn't help" is a conclusion that needs the observation *plus* a
+  controlled comparison.
+- **When an earlier attribution turns out wrong, correct it explicitly** and say
+  what the evidence actually shows. Silently switching stories destroys the audit
+  trail that makes these numbers worth anything.
+
+This applies to conversation, commit messages, and manifest comments — not only
+to published reports. For report-specific rules see
+`docs/BENCHMARK-REPORTING-PRINCIPLES.md`.
+
 ## Placeholder Convention (IMPORTANT)
 
 This repo is published as a public sample. Committed manifests/docs use
