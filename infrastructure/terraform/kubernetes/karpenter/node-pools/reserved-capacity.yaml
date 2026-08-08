@@ -31,8 +31,6 @@ spec:
       - key: "karpenter.k8s.aws/instance-hypervisor"
         operator: In
         values: [ "nitro" ]
-  limits:
-    cpu: 5000
   disruption:
     consolidationPolicy: WhenEmpty
     consolidateAfter: 300s

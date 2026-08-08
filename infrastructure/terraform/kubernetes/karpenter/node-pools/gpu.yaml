@@ -11,8 +11,6 @@ spec:
     - nodes: 10%
     consolidateAfter: 300s
     consolidationPolicy: WhenEmpty
-  limits:
-    cpu: 5000
   template:
     spec:
       expireAfter: 720h
