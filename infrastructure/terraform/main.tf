@@ -19,6 +19,10 @@ terraform {
       source  = "hashicorp/time"
       version = ">= 0.9"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.5"
+    }
   }
 
   # Partial backend config — supply bucket/key/region at init time:

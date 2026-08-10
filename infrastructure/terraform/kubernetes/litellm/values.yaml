@@ -1,0 +1,75 @@
+# Service account is what the EKS Pod Identity association binds to —
+# name must match module.litellm_bedrock_pod_identity in litellm-langfuse.tf
+serviceAccount:
+  create: true
+  name: litellm
+
+masterkey: ${master_key}
+
+# Bundled Postgres: required for the Admin UI login, virtual keys and spend tracking
+db:
+  deployStandalone: true
+  useExisting: false
+migrationJob:
+  enabled: true
+
+postgresql:
+  image:
+    # Bitnami moved its free images out of docker.io/bitnami into
+    # docker.io/bitnamilegacy; the chart's pinned tag 404s on the old path.
+    repository: bitnamilegacy/postgresql
+  auth:
+    username: litellm
+    database: litellm
+    password: ${postgres_password}
+    postgres-password: ${postgres_password}
+
+envVars:
+  # In-cluster Langfuse — the chart's web Service is <release>-web
+  LANGFUSE_HOST: http://langfuse-web.langfuse:3000
+  LANGFUSE_PUBLIC_KEY: ${langfuse_public_key}
+  LANGFUSE_SECRET_KEY: ${langfuse_secret_key}
+
+proxy_config:
+  model_list:
+  # ---------------------------------------------------------------------------
+  # Self-hosted models from k8s-manifest/. CHANGE ME: the entry below matches
+  # k8s-manifest/vllm/glm-5.2-fp8-p5en-vllm.yaml (Service `glm-5-2-vllm` on port
+  # 80, --served-model-name=zai-org/GLM-5.2-FP8) deployed in the `default`
+  # namespace. Point `model:` at the served-model-name and `api_base` at the
+  # Service FQDN of whatever you actually deployed. LiteLLM fails the whole
+  # config if a listed model is unreachable at request time, not at boot, so an
+  # entry for a model you have not deployed is harmless until it is called.
+  - model_name: glm-5.2
+    litellm_params:
+      model: openai/zai-org/GLM-5.2-FP8
+      api_base: http://glm-5-2-vllm.default.svc.cluster.local/v1
+      api_key: dummy # vLLM/SGLang run without auth in this repo's manifests
+  # ---------------------------------------------------------------------------
+  # Bedrock via EKS Pod Identity. No aws_access_key_id/secret here on purpose:
+  # boto3's default chain resolves credentials from the Pod Identity agent.
+  # Model IDs must exist in ${region} — check with
+  #   aws bedrock list-inference-profiles --region ${region}
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-5
+      aws_region_name: ${region}
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: ${region}
+  litellm_settings:
+    success_callback: ["langfuse"]
+    failure_callback: ["langfuse"]
+  general_settings:
+    master_key: os.environ/PROXY_MASTER_KEY
+
+# ClusterIP + port-forward, matching every Service in k8s-manifest/. This stack
+# has enable_aws_load_balancer_controller = false and no external-dns, so an
+# Ingress here would never get an address.
+ingress:
+  enabled: false
+
+service:
+  type: ClusterIP
+  port: 4000

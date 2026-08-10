@@ -12,6 +12,9 @@ enable_aws_efa_device_plugin = true
 # LWS controller — defaults to true; set false to skip the multi-node lws/ examples
 # enable_lws = true
 
+# LiteLLM gateway + Langfuse observability (opt-in, ClusterIP only)
+enable_litellm_langfuse = false
+
 # On-Demand Capacity Reservation / Capacity Block (opt-in)
 enable_capacity_reservation = false
 # capacity_reservation_id   = "cr-xxxxxxxxxxxxxxxxx"

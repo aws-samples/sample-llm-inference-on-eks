@@ -28,6 +28,7 @@ worker node is provisioned by Karpenter.
 - `eks.tf` — EKS module, Fargate profiles, core managed add-ons, `gp3` default StorageClass, outputs
 - `karpenter.tf` — Karpenter module + Helm releases, manifest loaders for `kubernetes/karpenter/{node-classes,node-pools,flow-schemas}/`
 - `addons.tf` — `eks-blueprints-addons`, Pod Identity associations, GPU Operator, EFA device plugin, LWS controller
+- `litellm-langfuse.tf` — opt-in LiteLLM + Langfuse (`enable_litellm_langfuse`, default `false`), their generated secrets, LiteLLM's Bedrock Pod Identity
 - `kubernetes/` — Helm value **overrides** (merged onto upstream chart defaults, not full copies) and raw manifests consumed by the above
 - `cleanup.sh` — ordered destroy + cleanup of ELB-controller-created security groups
 
@@ -46,6 +47,8 @@ worker node is provisioned by Karpenter.
 - **VPC endpoints are intentional** (S3 Gateway + ECR Interface) so private-subnet pods don't pay NAT egress for image pulls and S3.
 - **Extra AZ beyond the usual three** — the newest GPU on-demand capacity is often only available in the fourth AZ. Public subnet CIDRs are offset to stay clear of the wider private ranges; changing the AZ count means re-checking that offset.
 - **`instanceStorePolicy: RAID0`** on the GPU NodeClasses is what makes the manifests' `hostPath: /mnt/k8s-disks/0/models/` model cache land on local NVMe. Removing it silently pushes ~750 GB model downloads onto the EBS root volume.
+- **LiteLLM and Langfuse are ClusterIP with `ingress.enabled: false`.** Not an oversight: this stack has `enable_aws_load_balancer_controller = false` and no external-dns, so an Ingress would never get an address. The upstream reference config these were ported from used an ALB + ACM wildcard cert + `var.dns_domain`; none of that exists here. Don't re-add the Ingress without also enabling the ALB controller, and if you do, `langfuse.nextauth.url` must match the external URL or NextAuth callbacks break.
+- **`cleanup.sh` destroys the LiteLLM/Langfuse releases and namespaces before `kubectl delete nodepool`.** Helm leaves StatefulSet PVCs behind, and the EBS CSI controller that deletes the gp3 volumes runs on a Karpenter node — reorder this after the NodePool deletion and the volumes leak as orphaned EBS.
 
 ## Relationship to `k8s-manifest/`
 

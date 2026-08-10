@@ -53,6 +53,12 @@ variable "enable_lws" {
   description = "Whether to install the LeaderWorkerSet (LWS) controller, required by the multi-node k8s-manifest/lws examples"
 }
 
+variable "enable_litellm_langfuse" {
+  type        = bool
+  default     = false
+  description = "Whether to install the LiteLLM gateway + Langfuse observability stack (ClusterIP only; LiteLLM gets Bedrock access via Pod Identity)"
+}
+
 variable "enable_capacity_reservation" {
   type        = bool
   default     = false
