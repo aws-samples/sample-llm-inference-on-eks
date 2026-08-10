@@ -11,8 +11,10 @@ langfuse:
   encryptionKey:
     value: "${encryption_key}"
 
-  # Headless init: provision org/project/API keys/admin user on first boot,
-  # so LiteLLM's callback keys work without any UI steps.
+  # Headless init: provision org/project/admin user on first boot. The project
+  # API keys are only seeded when LiteLLM is also deployed — Terraform generates
+  # the pair so LiteLLM's callback config works before Langfuse has booted.
+  # Without LiteLLM, generate keys in the UI for your own SDK clients.
   additionalEnv:
   - name: LANGFUSE_INIT_ORG_ID
     value: default-org
@@ -22,10 +24,12 @@ langfuse:
     value: default-project
   - name: LANGFUSE_INIT_PROJECT_NAME
     value: Default Project
+%{ if seed_project_keys ~}
   - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
     value: "${langfuse_public_key}"
   - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
     value: "${langfuse_secret_key}"
+%{ endif ~}
   - name: LANGFUSE_INIT_USER_EMAIL
     value: "${admin_email}"
   - name: LANGFUSE_INIT_USER_NAME

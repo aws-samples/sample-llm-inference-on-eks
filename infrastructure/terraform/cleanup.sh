@@ -23,7 +23,8 @@ else
   # behind by design, and the EBS CSI controller that has to delete the gp3
   # volumes runs on a Karpenter node — so this has to happen while nodes still
   # exist, or the volumes leak as orphaned EBS. No-op when the releases were
-  # never installed (enable_litellm_langfuse = false leaves them at count 0).
+  # never installed (enable_litellm / enable_langfuse = false leave them at
+  # count 0).
   for release in helm_release.litellm helm_release.langfuse; do
     terraform destroy -target="$release" -auto-approve || true
   done

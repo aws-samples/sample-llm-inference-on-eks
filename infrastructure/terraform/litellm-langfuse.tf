@@ -1,16 +1,24 @@
 ################################################################################
-# LiteLLM (LLM gateway) + Langfuse (LLM observability) — opt-in
+# LiteLLM (LLM gateway) + Langfuse (LLM observability) — two independent opt-ins
 #
-# Gated behind `enable_litellm_langfuse` (default false). LiteLLM fronts both the
-# self-hosted models from k8s-manifest/ and Bedrock, and reports every call to
-# Langfuse. Both are ClusterIP only — reach them with `kubectl port-forward`
-# (see README). Bedrock access uses EKS Pod Identity, so there are no static keys.
+# `enable_litellm` and `enable_langfuse` are separate because each is useful
+# alone: LiteLLM as a plain gateway in front of the k8s-manifest/ models and
+# Bedrock, Langfuse as a tracing backend for an app you instrument yourself.
+# Enable both and the tracing integration is wired automatically — LiteLLM gets
+# Langfuse callbacks plus pre-seeded project keys. Both are ClusterIP only; reach
+# them with `kubectl port-forward` (see README). LiteLLM's Bedrock access uses
+# EKS Pod Identity, so there are no static keys.
 ################################################################################
 
 locals {
   litellm_namespace  = "litellm"
   langfuse_namespace = "langfuse"
-  litellm_langfuse   = var.enable_litellm_langfuse ? 1 : 0
+
+  litellm  = var.enable_litellm ? 1 : 0
+  langfuse = var.enable_langfuse ? 1 : 0
+
+  # The tracing integration only exists when both halves are deployed
+  litellm_langfuse_wired = var.enable_litellm && var.enable_langfuse
 }
 
 ################################################################################
@@ -23,7 +31,7 @@ locals {
 ################################################################################
 
 resource "random_password" "litellm_master_key" {
-  count = local.litellm_langfuse
+  count = local.litellm
   # special = false: the key is interpolated into a YAML scalar and pasted into
   # curl commands, so keep it shell- and YAML-safe.
   length  = 32
@@ -31,73 +39,75 @@ resource "random_password" "litellm_master_key" {
 }
 
 resource "random_password" "litellm_postgres" {
-  count   = local.litellm_langfuse
+  count   = local.litellm
   length  = 24
   special = false
 }
 
 resource "random_password" "langfuse_salt" {
-  count   = local.litellm_langfuse
+  count   = local.langfuse
   length  = 32
   special = false
 }
 
 resource "random_password" "langfuse_nextauth_secret" {
-  count   = local.litellm_langfuse
+  count   = local.langfuse
   length  = 32
   special = false
 }
 
 # Langfuse requires a 256-bit hex encryption key (`openssl rand -hex 32`)
 resource "random_id" "langfuse_encryption_key" {
-  count       = local.litellm_langfuse
+  count       = local.langfuse
   byte_length = 32
 }
 
 resource "random_password" "langfuse_postgres" {
-  count   = local.litellm_langfuse
+  count   = local.langfuse
   length  = 24
   special = false
 }
 
 resource "random_password" "langfuse_clickhouse" {
-  count   = local.litellm_langfuse
+  count   = local.langfuse
   length  = 24
   special = false
 }
 
 resource "random_password" "langfuse_redis" {
-  count   = local.litellm_langfuse
+  count   = local.langfuse
   length  = 24
   special = false
 }
 
 resource "random_password" "langfuse_s3" {
-  count   = local.litellm_langfuse
+  count   = local.langfuse
   length  = 24
   special = false
 }
 
 resource "random_password" "langfuse_admin" {
-  count   = local.litellm_langfuse
+  count   = local.langfuse
   length  = 16
   special = false
 }
 
-# Pre-generated project keys, so LiteLLM's callback config is known before
-# Langfuse has ever booted (LANGFUSE_INIT_* seeds these on first start)
+# Project keys for the LiteLLM -> Langfuse integration. Generated here (rather
+# than read back from Langfuse) so LiteLLM's callback config is known before
+# Langfuse has ever booted; LANGFUSE_INIT_* seeds the same values on first start.
+# Only needed when both halves are enabled.
 resource "random_uuid" "langfuse_public_key" {
-  count = local.litellm_langfuse
+  count = local.litellm_langfuse_wired ? 1 : 0
 }
 
 resource "random_uuid" "langfuse_secret_key" {
-  count = local.litellm_langfuse
+  count = local.litellm_langfuse_wired ? 1 : 0
 }
 
 locals {
-  langfuse_admin_email = "admin@${local.litellm_namespace}.local"
-  langfuse_public_key  = local.litellm_langfuse > 0 ? "pk-lf-${random_uuid.langfuse_public_key[0].result}" : ""
-  langfuse_secret_key  = local.litellm_langfuse > 0 ? "sk-lf-${random_uuid.langfuse_secret_key[0].result}" : ""
+  langfuse_admin_email = "admin@${local.langfuse_namespace}.local"
+  langfuse_public_key  = local.litellm_langfuse_wired ? "pk-lf-${random_uuid.langfuse_public_key[0].result}" : ""
+  langfuse_secret_key  = local.litellm_langfuse_wired ? "sk-lf-${random_uuid.langfuse_secret_key[0].result}" : ""
 }
 
 ################################################################################
@@ -105,7 +115,7 @@ locals {
 ################################################################################
 
 module "litellm_bedrock_pod_identity" {
-  count   = local.litellm_langfuse
+  count   = local.litellm
   source  = "terraform-aws-modules/eks-pod-identity/aws"
   version = "~> 2.7"
 
@@ -146,7 +156,7 @@ module "litellm_bedrock_pod_identity" {
 ################################################################################
 
 resource "helm_release" "langfuse" {
-  count            = local.litellm_langfuse
+  count            = local.langfuse
   name             = "langfuse"
   repository       = "https://langfuse.github.io/langfuse-k8s"
   chart            = "langfuse"
@@ -158,13 +168,16 @@ resource "helm_release" "langfuse" {
   wait = false
 
   values = [templatefile("${path.module}/kubernetes/langfuse/values.yaml", {
-    salt                = random_password.langfuse_salt[0].result
-    nextauth_secret     = random_password.langfuse_nextauth_secret[0].result
-    encryption_key      = random_id.langfuse_encryption_key[0].hex
+    salt            = random_password.langfuse_salt[0].result
+    nextauth_secret = random_password.langfuse_nextauth_secret[0].result
+    encryption_key  = random_id.langfuse_encryption_key[0].hex
+    admin_email     = local.langfuse_admin_email
+    admin_password  = random_password.langfuse_admin[0].result
+    # Without LiteLLM there is no pre-shared key pair to seed; the project is
+    # still created and you generate keys in the UI for your own SDK clients.
+    seed_project_keys   = local.litellm_langfuse_wired
     langfuse_public_key = local.langfuse_public_key
     langfuse_secret_key = local.langfuse_secret_key
-    admin_email         = local.langfuse_admin_email
-    admin_password      = random_password.langfuse_admin[0].result
     postgres_password   = random_password.langfuse_postgres[0].result
     clickhouse_password = random_password.langfuse_clickhouse[0].result
     redis_password      = random_password.langfuse_redis[0].result
@@ -186,7 +199,7 @@ resource "helm_release" "langfuse" {
 ################################################################################
 
 resource "helm_release" "litellm" {
-  count            = local.litellm_langfuse
+  count            = local.litellm
   name             = "litellm"
   repository       = "oci://ghcr.io/berriai"
   chart            = "litellm-helm"
@@ -198,9 +211,14 @@ resource "helm_release" "litellm" {
   wait = false
 
   values = [templatefile("${path.module}/kubernetes/litellm/values.yaml", {
-    region              = local.region
-    master_key          = "sk-${random_password.litellm_master_key[0].result}"
-    postgres_password   = random_password.litellm_postgres[0].result
+    region            = local.region
+    master_key        = "sk-${random_password.litellm_master_key[0].result}"
+    postgres_password = random_password.litellm_postgres[0].result
+    # Callbacks and the LANGFUSE_* env block are omitted entirely when Langfuse
+    # is not deployed — a `langfuse` callback with no reachable host makes every
+    # request log callback errors.
+    langfuse_enabled    = local.litellm_langfuse_wired
+    langfuse_host       = "http://langfuse-web.${local.langfuse_namespace}:3000"
     langfuse_public_key = local.langfuse_public_key
     langfuse_secret_key = local.langfuse_secret_key
   })]
@@ -218,23 +236,23 @@ resource "helm_release" "litellm" {
 
 output "litellm_port_forward" {
   description = "Reach the LiteLLM gateway at http://localhost:4000 (OpenAI-compatible /v1)"
-  value       = local.litellm_langfuse > 0 ? "kubectl port-forward -n ${local.litellm_namespace} svc/litellm 4000:4000" : null
+  value       = local.litellm > 0 ? "kubectl port-forward -n ${local.litellm_namespace} svc/litellm 4000:4000" : null
 }
 
 output "litellm_master_key" {
   description = "LiteLLM master key — use as the Bearer token / OpenAI api_key"
-  value       = local.litellm_langfuse > 0 ? "sk-${random_password.litellm_master_key[0].result}" : null
+  value       = local.litellm > 0 ? "sk-${random_password.litellm_master_key[0].result}" : null
   sensitive   = true
 }
 
 output "langfuse_port_forward" {
   description = "Reach the Langfuse UI at http://localhost:3000"
-  value       = local.litellm_langfuse > 0 ? "kubectl port-forward -n ${local.langfuse_namespace} svc/langfuse-web 3000:3000" : null
+  value       = local.langfuse > 0 ? "kubectl port-forward -n ${local.langfuse_namespace} svc/langfuse-web 3000:3000" : null
 }
 
 output "langfuse_admin_login" {
   description = "Seeded Langfuse admin credentials (LANGFUSE_INIT_USER_*)"
-  value = local.litellm_langfuse > 0 ? {
+  value = local.langfuse > 0 ? {
     email    = local.langfuse_admin_email
     password = random_password.langfuse_admin[0].result
   } : null
