@@ -46,6 +46,8 @@ manifest with instance types and maintenance status.
 │   ├── GLM-5.2-BENCHMARK.md    # GLM-5.2 benchmark: TP8 vs TP16 vs PD-disagg on p5en
 │   ├── KIMI-K3-B300-PERFORMANCE.md    # Kimi-K3 2.8T on p6-b300 TP8 (EN)
 │   ├── KIMI-K3-B300-PERFORMANCE-zh.md # ^ 同一内容中文版
+│   ├── KIMI-K3-PP3-PERFORMANCE.md     # Kimi-K3 on 3x p5en TP8xPP3: 1M-context deployment
+│   ├── KIMI-K3-PP-TOPOLOGY.md         # ^ why TP8xPP3 and not TP24/PP2; KV block arithmetic
 │   ├── PD_DISAGGREGATION.md    # Prefill/decode disaggregation architecture deep-dive
 │   ├── benchmark-commands.md   # genai-perf / bench_serving command reference
 │   ├── BENCHMARK-METHODOLOGY.md  # How to measure steady state and compare fairly

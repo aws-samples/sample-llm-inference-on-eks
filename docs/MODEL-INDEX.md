@@ -55,6 +55,13 @@ KV-cache offload & externalization (HiCache / LMCache / Redis L2) measured in
 2026-07-29) and it runs the recipe without the H200 profile's restrictions. The
 2-node TP16 shape exists for sites without B300 capacity.
 
+**If you need the full 1M context window**, that is the 3-node TP8×PP3 shape —
+measured 2026-08-09 in [KIMI-K3-PP3-PERFORMANCE.md](KIMI-K3-PP3-PERFORMANCE.md),
+with the topology and KV-block reasoning in
+[KIMI-K3-PP-TOPOLOGY.md](KIMI-K3-PP-TOPOLOGY.md). Read the warning at the top of
+the performance doc first: full 1M was never exercised (retrieval verified to
+91.7K), and long context requires the patched image described below.
+
 Args follow the official recipe's per-hardware profile —
 [b300](https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=b300) for the single-node
 manifest, [h200](https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=h200) for the
