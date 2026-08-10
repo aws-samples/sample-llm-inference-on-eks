@@ -285,11 +285,9 @@ callbacks break if it doesn't match the URL you actually browse to.
 
 ### Configuring models
 
-`kubernetes/litellm/values.yaml` holds the `proxy_config.model_list`. The
-self-hosted entry there is an **example** matching
-`k8s-manifest/vllm/glm-5.2-fp8-p5en-vllm.yaml` (Service `glm-5-2-vllm`,
-`--served-model-name=zai-org/GLM-5.2-FP8`, `default` namespace) — edit it for
-whatever you actually deployed:
+`kubernetes/litellm/values.yaml` holds the `proxy_config.model_list`. Only the
+Bedrock entries are listed by default — which self-hosted models exist depends on
+what you applied from `k8s-manifest/`, so add one entry per deployed model:
 
 ```yaml
 - model_name: <name-clients-use>
@@ -299,8 +297,11 @@ whatever you actually deployed:
     api_key: dummy   # this repo's manifests serve without auth
 ```
 
-An entry for a model you haven't deployed only fails when that model is called,
-not at startup. Bedrock model IDs must exist in your region — check with
+`model:` is `openai/` plus the manifest's `--served-model-name`; `api_base` is the
+model Service's in-cluster FQDN. Every Service in `k8s-manifest/` is ClusterIP,
+and the OpenAI-compatible one listens on port 80 — for the prefill/decode
+(`-pd-`) manifests that is the **router** Service, not the per-role ones on
+30000/30001. Bedrock model IDs must exist in your region — check with
 `aws bedrock list-inference-profiles --region <region>`. If you add a non-Anthropic
 provider, widen the IAM `resources` in `litellm-langfuse.tf` to match.
 

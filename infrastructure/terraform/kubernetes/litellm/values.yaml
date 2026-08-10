@@ -33,18 +33,16 @@ envVars:
 proxy_config:
   model_list:
   # ---------------------------------------------------------------------------
-  # Self-hosted models from k8s-manifest/. CHANGE ME: the entry below matches
-  # k8s-manifest/vllm/glm-5.2-fp8-p5en-vllm.yaml (Service `glm-5-2-vllm` on port
-  # 80, --served-model-name=zai-org/GLM-5.2-FP8) deployed in the `default`
-  # namespace. Point `model:` at the served-model-name and `api_base` at the
-  # Service FQDN of whatever you actually deployed. LiteLLM fails the whole
-  # config if a listed model is unreachable at request time, not at boot, so an
-  # entry for a model you have not deployed is harmless until it is called.
-  - model_name: glm-5.2
-    litellm_params:
-      model: openai/zai-org/GLM-5.2-FP8
-      api_base: http://glm-5-2-vllm.default.svc.cluster.local/v1
-      api_key: dummy # vLLM/SGLang run without auth in this repo's manifests
+  # Self-hosted models from k8s-manifest/. Add an entry per model you actually
+  # deployed — `model:` is `openai/` + the manifest's --served-model-name, and
+  # `api_base` is the model Service's in-cluster FQDN. Nothing is listed by
+  # default because which models exist depends on what you applied.
+  #
+  # - model_name: <name clients ask for>
+  #   litellm_params:
+  #     model: openai/<the --served-model-name value>
+  #     api_base: http://<service>.<namespace>.svc.cluster.local/v1
+  #     api_key: dummy   # this repo's manifests serve without auth
   # ---------------------------------------------------------------------------
   # Bedrock via EKS Pod Identity. No aws_access_key_id/secret here on purpose:
   # boto3's default chain resolves credentials from the Pod Identity agent.
