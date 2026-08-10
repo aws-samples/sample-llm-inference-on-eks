@@ -38,6 +38,7 @@ add NIXL for PD KV transfer.
 |---|---|---|---|
 | `Dockerfile.efa-sglang-0513` | SGLang v0.5.13.post1 | EFA 1.49 + aws-ofi-nccl (base wheel already ships NIXL w/ LIBFABRIC) | **Current** — GLM-5.2 manifests (TP16 and PD) |
 | `Dockerfile.efa-vllm-kimi-k3` | vLLM `:kimi-k3` (≥0.27.0 nightly) | EFA 1.49 + aws-ofi-nccl | **Current** — Kimi-K3 TP16 manifest |
+| `Dockerfile.efa-vllm-kimi-k3-p50327` | ↑ that image | vLLM PR #50327 (chunk-prefill crash fix) | ⏳ **Stopgap, as of 2026-08-09** — Kimi-K3 PP3 manifest; retire per the note below |
 | `Dockerfile.efa-nixl-sglang-0510` | SGLang v0.5.10 | EFA + aws-ofi-nccl + NIXL from source | DeepSeek-V3.2 PD manifests |
 | `Dockerfile.efa-nixl-sglang-057` | SGLang v0.5.7 | EFA + aws-ofi-nccl + NIXL | archived |
 | `Dockerfile.efa-sglang-057` | SGLang v0.5.7 | EFA + aws-ofi-nccl | archived |
@@ -46,6 +47,29 @@ add NIXL for PD KV transfer.
 > already bundle a NIXL wheel with the LIBFABRIC backend — building NIXL from
 > source on top installs a second `libnixl` and breaks imports (ABI conflict).
 > Only add EFA userspace + aws-ofi-nccl; don't rebuild NIXL.
+
+> [!IMPORTANT]
+> **`-p50327` is a temporary patch layer — as of 2026-08-09 — not a design choice.**
+> On a stock image, long context is unusable: any input above
+> `--max-num-batched-tokens` is chunk-prefilled, and before the fix every chunk
+> boundary after the first threw `IndexError: index_fill_(): Expected dtype int64
+> for index` (`mamba_hybrid.py:314`). Requests still returned HTTP 200 and the
+> engine stayed up, so it failed **silently** — the KDA state hand-off was skipped.
+> 1,280 occurrences in one 128K run.
+>
+> The layer applies upstream
+> [PR #50327](https://github.com/vllm-project/vllm/pull/50327) verbatim (merged
+> 2026-08-03, `e578de31`). It exists only because **no released vLLM had the fix**:
+> v0.26.0 shipped 2026-07-27, seven days earlier (verified at that tag; issue
+> [#50947](https://github.com/vllm-project/vllm/issues/50947) still open).
+>
+> **How to retire it:** grep the installed
+> `vllm/v1/worker/gpu/model_states/mamba_hybrid.py` in your base image for
+> `_fill_num_accepted_kernel`. Present → delete `Dockerfile.efa-vllm-kimi-k3-p50327`
+> and `vllm-50327-mamba-hybrid-int32.patch`, and point the PP3 manifest at the plain
+> `Dockerfile.efa-vllm-kimi-k3` image. The Dockerfile deliberately omits
+> `patch --forward`, so a base that already carries the fix makes the **build fail**
+> rather than silently reverse it — that failure is the cue to clean up.
 
 Build & push:
 
@@ -65,6 +89,8 @@ Then update the `image:` in the manifest you deploy.
 |---|---|---|---|
 | `lws-glm-5.2-tp16-p5en.yaml` | GLM-5.2-FP8 | TP16, 2× p5en | ✅ current |
 | `lws-kimi-k3-tp16-p5en.yaml` | Kimi-K3 (vLLM) | TP16, 2× p5en | ✅ current |
+| `lws-kimi-k3-tp8pp2-p5en.yaml` | Kimi-K3 (vLLM) | TP8×PP2, 2× p5en | ⚠️ untested |
+| `lws-kimi-k3-tp8pp3-p5en.yaml` | Kimi-K3 (vLLM) | TP8×PP3, 3× p5en | ✅ measured 2026-08-09 — needs the stopgap image, see below |
 | `lws-glm-5.2-pd-p5en.yaml` | GLM-5.2-FP8 | 1P+1D + router, 2× p5en | ✅ current |
 | `lws-deepseek-v3.2-tp16-p5.yaml` | DeepSeek-V3.2 | TP16, 2× p5 | ✅ |
 | `lws-deepseek-v3.2-pd-p5en.yaml` | DeepSeek-V3.2 | 1P+1D + router, 2× p5en | ✅ |

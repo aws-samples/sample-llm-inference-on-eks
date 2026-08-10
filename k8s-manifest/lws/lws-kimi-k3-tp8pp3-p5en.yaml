@@ -1,0 +1,411 @@
+# Kimi-K3 (2.8T MXFP4 MoE) on vLLM, TP=8 x PP=3 across 3x p5en.48xlarge (24x H200).
+# Engine args follow the official recipe's *h200* multi_node_tp_pp profile
+# (https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=h200 -> multi_node_tp_pp),
+# with pipeline-parallel-size and nnodes raised from the recipe's 2 to 3.
+#
+# MEASURED 2026-08-09 on 3x p5en.48xlarge in us-west-2c. Full data:
+# local/KIMI-K3-TP8PP3-1M-ANALYSIS.md sections 8.1-8.5. Headlines:
+#   - short input (ISL 1000): aggregate throughput scaled to >=2,169 tok/s at
+#     c512 and had NOT saturated; per-user speed fell to 6.8 tok/s there, so the
+#     useful band is far lower (c32-c64 for >=20 tok/s per user)
+#   - 128K input, c4: TTFT p50 11.7 s, ITL p50 49 ms, 47.1 tok/s, 0.0689 rps
+#   - retrieval verified at 91,700 tokens (3/3 needles). FULL 1M NOT MEASURED —
+#     the engine starts and serves at max-model-len 1048576, but the span from
+#     91.7K to 1M is unverified.
+#   - at a full 1M window KV caps concurrency at 6 (engine's own arithmetic:
+#     "Maximum concurrency for 1,048,576 tokens per request: 6.07x"), so
+#     --max-num-seqs is irrelevant there. NOT exercised.
+#
+# 1M CONTEXT DOES NOT REQUIRE 3 NODES. TP8xPP2 on 2 nodes reaches it — measured
+# 2026-08-06. A third node buys more KV headroom and a lower per-GPU weight
+# footprint, nothing categorical. Size expectations accordingly.
+#
+# WHY NOT TP24: TP24 cannot start at all. vocab_size is 163,840 and vLLM pads it
+# with a fixed padding_size of 64 (DEFAULT_VOCAB_PADDING_SIZE — it does NOT scale
+# with tp_size; verified across every call site in
+# vllm/model_executor/layers/vocab_parallel_embedding.py), leaving 163,840, which
+# is then passed to `divide(num_embeddings_padded, tp_size)` at :310.
+# 163,840 % 24 = 16, and `divide()` is a hard assert
+# (vllm/distributed/utils.py:53-64), so the engine aborts during init.
+# Every other TP-sharded dim IS divisible by 24 (checked against the model's
+# config.json on HF): q_proj out 18,432 / kv_b_proj out 24,576 / o_proj in 12,288 /
+# moe_intermediate 3,072 / dense intermediate 33,792 / 96 attention+KDA heads.
+# Only vocab fails — but one failure is enough.
+# (kv_lora_rank 512 is NOT a problem despite 512 % 24 = 8: it is the *input* dim
+# of kv_b_proj, and ColumnParallelLinear shards only the output dim.)
+# So on 3 nodes the workable shape is TP8 (intra-node, NVLink) x PP3 (inter-node,
+# EFA). Every sharded dim only needs to divide by 8.
+#
+# PP3 also splits the layers evenly: num_hidden_layers is 93, so 93/3 = 31 exactly,
+# versus 93/2 = 46.5 which vLLM must split unevenly. Per-stage full-attn/KDA
+# balance is 7/24, 8/23, 9/22 — the 9-full-attn stage is the binding one for KV.
+#
+# --gpu-memory-utilization is 0.93, not the recipe's 0.97, carried over from the
+# PP2 shape where 0.97 CUDA-OOMed under concurrency (measured; see that manifest).
+# The mechanism applies here too: vLLM profiles activations once on a single
+# request and gives the rest to KV, leaving nothing for the real peak.
+#
+# ENGINE BUG — FIXED IN THE IMAGE THIS MANIFEST PINS. Any request whose input
+# exceeds --max-num-batched-tokens (4096) is chunk-prefilled, and before the fix
+# every chunk boundary after the first logged
+#   IndexError: index_fill_(): Expected dtype int64 for index
+#   at vllm/v1/worker/gpu/model_states/mamba_hybrid.py:314 postprocess_state
+# (first seen on PP2 2026-08-06; fired 1,280 times during a 128K run 2026-08-09).
+# Requests still returned HTTP 200 and the engine survived, so the failure was
+# silent — the KDA state hand-off was simply skipped.
+#
+# The image below is tagged -p50327 because it backports upstream vLLM PR #50327.
+# NO RELEASED vLLM CARRIES THAT FIX: it merged 2026-08-03, seven days after
+# v0.26.0 shipped (verified by reading mamba_hybrid.py at that tag 2026-08-09;
+# issue #50947 is still open). If you retag this manifest to a plain
+# vllm-efa-kimi-k3 image, the bug comes back on every long-context request.
+# Post-fix checks: IndexError count 0 across an 18k-token probe, a 91.7k-token
+# needle test (3/3 recalled) and a 128K benchmark. That covers retrieval, NOT
+# output quality in general.
+#
+# IMAGE PREREQUISITE: the upstream vllm/vllm-openai:kimi-k3 image contains NO EFA
+# userspace (verified from its image config, 2026-07-31), so the cross-node
+# pipeline traffic would fall back to TCP over eth0. Build
+# Dockerfile.efa-vllm-kimi-k3 first.
+#
+# Weights: ~1.56 TB across 118 files, public/ungated. First start on fresh nodes
+# downloads all of it to node-local NVMe (~12 min at the 2.28 GiB/s measured
+# 2026-08-03); every node needs its own copy.
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: lws-kimi-k3-pp3
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 3
+    # RecreateGroupOnPodRestart, NOT None. Measured 2026-07-31 on the TP16 shape:
+    # with None, the leader crash-looped while workers stayed up, so each new
+    # leader created a fresh TCPStore that the workers' already-joined ranks never
+    # rejoined — the rendezvous stalled at "N/24 clients joined" and timed out
+    # forever. vLLM's TCPStore rendezvous has no re-join path, so the whole group
+    # MUST restart as a unit. This matters more at PP3: three pods to resync.
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec: &common-spec
+        priorityClassName: high-priority-100
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5en.48xlarge
+        tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        # Same-AZ co-location, REQUIRED for EFA RDMA. Measured 2026-08-03 on the
+        # TP16 shape: with only the instance-type nodeSelector, Karpenter put the
+        # leader in us-west-2a and the worker in us-west-2c, and NCCL died at
+        # connect time with
+        #   NET/OFI CM: Unable to insert remote address into address vector
+        #   NET/OFI CM connect failed: Failed call to fi_av_insert
+        # EFA is an intra-AZ fabric — a cross-AZ group cannot form at all. With 3
+        # nodes the chance of a split is higher, so this is not optional.
+        # Self-selecting podAffinity pins every pod of the group into one zone; it
+        # cannot deadlock the first pod, because a required podAffinity term that
+        # matches no existing pod is treated as satisfied.
+        # Do NOT use the LWS `exclusive-topology` annotation instead: the
+        # controller turns it into podAntiAffinity, which does the opposite.
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  leaderworkerset.sigs.k8s.io/name: lws-kimi-k3-pp3
+              topologyKey: topology.kubernetes.io/zone
+        containers:
+        - name: kimi-leader
+          image: &common-image <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/vllm-efa-kimi-k3:kimi-k3-efa1.49-p50327 # built from Dockerfile.efa-vllm-kimi-k3-p50327
+          imagePullPolicy: IfNotPresent
+          # Base image entrypoint is ["vllm","serve"]; args supply the rest.
+          args: &common-args
+            - moonshotai/Kimi-K3
+            - --host=0.0.0.0
+            - --port=8000
+            - --trust-remote-code
+            # multi-node wiring: vLLM's own multiproc backend (no Ray).
+            # world_size = TP8 x PP3 = 24; local_world_size = 24/3 = 8, i.e. one
+            # full TP group per node (vllm/config/parallel.py::local_world_size),
+            # so all TP collectives stay on NVLink and only PP crosses EFA.
+            # --master-port is left at vLLM's default 29501
+            # (vllm/config/parallel.py:273) — the containerPort below matches it.
+            - --tensor-parallel-size=8
+            - --pipeline-parallel-size=3
+            - --nnodes=3
+            - --master-addr=$(LWS_LEADER_ADDRESS)
+            # --- recipe's h200 multi_node_tp_pp profile ---
+            - --gpu-memory-utilization=0.93
+            # 32, NOT the recipe's 5 (that value came from the TP16 shape, whose KV
+            # pool held ~1 full-length request). Raised 2026-08-09 once this shape's
+            # real KV pool was known: 6,361,156 tokens, and a c4 ISL-1000 run used
+            # 0.2% of it. 5 capped the benchmark, not the hardware.
+            # Safe on memory: activation profiling does NOT scale with this flag —
+            # profile_run calls _dummy_run(self.max_num_tokens) and
+            # max_num_tokens := max_num_batched_tokens (model_runner.py:153, :693),
+            # i.e. 4096 regardless. Idle headroom measured 13.9 GiB/GPU. The PP2
+            # 0.97 CUDA-OOM was a gpu-memory-utilization effect, not this flag.
+            # 32 is a serving default, not a ceiling: values of 128 and 512 both
+            # ran fine (peak activation unchanged at 1.29-2.19 GiB, KV pool within
+            # 0.6%) and 512 is where the >=2,169 tok/s figure in the header came
+            # from. It is not the default because at c512 each user gets 6.8 tok/s
+            # — slower than reading speed. Raise it only if aggregate throughput
+            # genuinely matters more than per-user latency; see analysis § 8.4.
+            - --max-num-seqs=32
+            # full 1M window (2 nodes also reach this — see header)
+            - --max-model-len=1048576
+            - --moe-backend=marlin
+            - --disable-custom-all-reduce
+            - --no-enable-flashinfer-autotune
+            # 4096 = recipe default. A/B 2026-08-09 tried 16384 and it was a pure
+            # loss: prefill tput stayed at ~12,802 tok/s (unchanged), the ~50-60s
+            # prefill/decode alternation period did not shrink, decode during
+            # prefill got WORSE (3.2 -> 0.8 tok/s), peak activation rose
+            # 2.19 -> 4.49 GiB and the KV pool shrank 6,361,156 -> 5,485,683
+            # tokens (-13.8%). The identical 12,801.x prefill rate under a 4x
+            # budget means something other than this flag caps per-step tokens;
+            # what, is NOT established. Do not raise it again without finding that.
+            - --max-num-batched-tokens=4096
+            - --attention-backend=FLASHMLA
+            # thinking / tool-call parsing. Recipe warns K3 occasionally emits a
+            # tool-call shape its own parser rejects — validate + retry client-side.
+            - --enable-auto-tool-choice
+            - --tool-call-parser=kimi_k3
+            - --reasoning-parser=kimi_k3
+            - --served-model-name=moonshotai/Kimi-K3
+            # rank differs per role — leader is 0, workers set their own below
+            - --node-rank=0
+          env: &common-env
+            # --- recipe's multi_node_tp_pp profile env ---
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "3600"
+            # this profile adds it over plain multi_node_tp: PP stages can sit
+            # waiting on an upstream stage far longer than a TP peer ever would
+            - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+              value: "1800"
+            - name: VLLM_USE_V2_MODEL_RUNNER
+              value: "1"
+            - name: VLLM_USE_RUST_FRONTEND
+              value: "1"
+            # also specific to this profile (not in multi_node_tp)
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            # The recipe's hopper profile sets this. Safe here — unlike the SGLang
+            # TP manifests (see lws/README.md "Memory"), which break on it because
+            # custom all-reduce cannot IPC-register VMM allocations; this manifest
+            # passes --disable-custom-all-reduce, so NCCL is used instead.
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            # NCCL Configuration
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            - name: GLOO_SOCKET_IFNAME
+              value: "eth0"
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            # EFA Configuration
+            - name: FI_PROVIDER
+              value: "efa"
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: NCCL_NET_PLUGIN
+              value: "ofi"
+            - name: NCCL_TUNER_PLUGIN
+              value: "ofi"
+          ports: &common-ports
+            - name: http
+              containerPort: 8000
+            - name: dist
+              containerPort: 29501
+          resources: &common-resources
+            limits:
+              vpc.amazonaws.com/efa: "16"
+              nvidia.com/gpu: "8"
+              # node has ~1.96 TiB allocatable; must also cover the 500Gi
+              # /dev/shm emptyDir below (medium: Memory counts against this)
+              memory: 1800Gi
+              ephemeral-storage: 200Gi
+          # first start downloads ~1.56 TB of weights — allow up to 150 min
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 300
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 600
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          volumeMounts: &common-volume-mounts
+            - name: cache-volume
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+          securityContext: &common-security-context
+            # IPC_LOCK is what vLLM's own docs ask for to enable GPUDirect RDMA
+            # (docs/serving/parallelism_scaling.md). Deliberately NOT privileged:
+            # the EFA device plugin injects /dev/infiniband whenever the pod
+            # requests vpc.amazonaws.com/efa, so privileged is not needed for EFA
+            # (measured on TP16/p5en 2026-07-31 — see CLAUDE.md).
+            capabilities:
+              add:
+              - IPC_LOCK
+        volumes: &common-volumes
+          - name: cache-volume
+            hostPath:
+              path: /mnt/k8s-disks/0/models/kimi
+              type: DirectoryOrCreate
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: "500Gi"
+    workerTemplate:
+      spec:
+        <<: *common-spec
+        containers:
+        - name: kimi-worker
+          image: *common-image
+          imagePullPolicy: IfNotPresent
+          # Same args as the leader except the last two: --node-rank comes from
+          # LWS's worker index (1 and 2 for the two workers), and --headless makes
+          # these engine-only. A headless worker starts NO API server, so it has
+          # no /health endpoint — its probes must stay tcpSocket-only (see below).
+          args:
+            - moonshotai/Kimi-K3
+            - --host=0.0.0.0
+            - --port=8000
+            - --trust-remote-code
+            - --tensor-parallel-size=8
+            - --pipeline-parallel-size=3
+            - --nnodes=3
+            - --master-addr=$(LWS_LEADER_ADDRESS)
+            - --gpu-memory-utilization=0.93
+            # must match the leader's — see the rationale there
+            - --max-num-seqs=32
+            # must match the leader's
+            - --max-model-len=1048576
+            - --moe-backend=marlin
+            - --disable-custom-all-reduce
+            - --no-enable-flashinfer-autotune
+            - --max-num-batched-tokens=4096
+            - --attention-backend=FLASHMLA
+            - --enable-auto-tool-choice
+            - --tool-call-parser=kimi_k3
+            - --reasoning-parser=kimi_k3
+            - --served-model-name=moonshotai/Kimi-K3
+            - --node-rank=$(LWS_WORKER_INDEX)
+            - --headless
+          env:
+            - name: LWS_WORKER_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "3600"
+            - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+              value: "1800"
+            - name: VLLM_USE_V2_MODEL_RUNNER
+              value: "1"
+            - name: VLLM_USE_RUST_FRONTEND
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            - name: GLOO_SOCKET_IFNAME
+              value: "eth0"
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            - name: FI_PROVIDER
+              value: "efa"
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: NCCL_NET_PLUGIN
+              value: "ofi"
+            - name: NCCL_TUNER_PLUGIN
+              value: "ofi"
+          # No ports: a headless worker does not listen on anything — it dials OUT
+          # to the leader's 29501 (vllm/entrypoints/cli/serve.py::run_headless,
+          # node_rank_within_dp > 0 branch: builds MultiprocExecutor and calls
+          # start_worker_monitor(inline=True); nothing binds).
+          resources: *common-resources
+          # Probes here CANNOT be httpGet or tcpSocket — headless mode starts no
+          # API server and opens no listening socket (workers dial OUT to the
+          # leader's 29501), so any such probe would fail on a healthy pod and, with
+          # RecreateGroupOnPodRestart, take the whole 3-pod group down every cycle.
+          # What we can verify is that the per-GPU worker processes are alive:
+          # MultiprocExecutor spawns one per local GPU, so 8 on this node.
+          #
+          # The pattern is "VLLM::Worker", verified by exec'ing into a live pod
+          # 2026-08-06. Do not use the process name from the Process(name=...) call
+          # in multiproc_executor.py — the worker overwrites it at runtime via
+          # set_process_title() with a topology-dependent string
+          # ("VLLM::Worker_PP1_TP0" on the PP2 shape; suffixes appear only when the
+          # corresponding parallel dim is > 1). The "VLLM::Worker" prefix is the
+          # part that is stable across TP/PP/DP/EP layouts.
+          #
+          # This is not redundant with the container's own exit behaviour: the
+          # inline worker monitor makes the main process exit when a subprocess
+          # dies, which K8s already catches. It covers what exit does not — a
+          # process still running but wedged, or fewer than 8 ever coming up.
+          # The startupProbe gives the group a bounded window (up to 150 min) to
+          # load 1.56 TB of weights before liveness starts counting.
+          startupProbe:
+            exec: &worker-alive
+              # 8 = GPUs on this node, i.e. one worker process per local GPU.
+              # pgrep matches on comm (NOT -f), which is what makes this safe:
+              # with -f the probe's own shell would match its own pattern and
+              # inflate the count. Measured on the live pod 2026-08-06: this
+              # returns exactly 8 on both worker and leader, while a
+              # `grep -la ... /proc/*/cmdline` variant returned 10 (self-match).
+              command: ["pgrep", "-c", "VLLM::Worker"]
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 300
+          livenessProbe:
+            exec: *worker-alive
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          # No readinessProbe: the worker backs no Service, so readiness gates
+          # nothing. Restarting the group is handled by restartPolicy above.
+          volumeMounts: *common-volume-mounts
+          securityContext: *common-security-context
+        volumes: *common-volumes
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kimi-k3-pp3-leader
+spec:
+  selector:
+    leaderworkerset.sigs.k8s.io/name: lws-kimi-k3-pp3
+    role: leader
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP

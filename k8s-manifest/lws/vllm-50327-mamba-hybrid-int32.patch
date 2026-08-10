@@ -1,0 +1,94 @@
+TEMPORARY STOPGAP — as of 2026-08-09. DELETE THIS FILE once a released vLLM
+carries the fix; do not treat it as part of the image's permanent design.
+
+This is upstream vLLM PR #50327 verbatim (merged 2026-08-03, commit e578de31),
+backported only because NO RELEASED VERSION HAD IT: v0.26.0 shipped 2026-07-27,
+seven days earlier. Verified 2026-08-09 by reading mamba_hybrid.py at the v0.26.0
+tag — the broken index_fill_ call is still there. Tracking issue #50947 was still
+open at that time.
+
+EXIT CRITERION: check whether the vLLM release the base image is built from
+contains commit e578de31 (or the _fill_num_accepted_kernel symbol in
+vllm/v1/worker/gpu/model_states/mamba_hybrid.py). If it does, drop this file and
+Dockerfile.efa-vllm-kimi-k3-p50327, and point the manifest at a plain image.
+Dockerfile.efa-vllm-kimi-k3-p50327 deliberately omits `patch --forward`, so a
+base image that already has the fix makes the build FAIL rather than silently
+reverse it — that failure is the signal to do this cleanup.
+
+Everything below the first `diff --git` line is upstream's diff, unmodified.
+`patch(1)` ignores this preamble. Do not edit the hunks to make them apply to a
+different base: an approximate backport is worse than none, because benchmark
+numbers would then be attributed to a fix that is not the upstream fix.
+
+diff --git a/vllm/v1/worker/gpu/model_states/mamba_hybrid.py b/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+index d7487afaaaf4..2715f790dcce 100644
+--- a/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
++++ b/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+@@ -294,18 +294,20 @@ def postprocess_state(
+     ) -> None:
+         # Chunked prefill does not sample a token, so num_sampled can be 0.
+         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
++        num_reqs = idx_mapping.shape[0]
++        if not num_reqs:
++            return
++
+         if not isinstance(num_sampled, int):
+             # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
+             # kernel skips them rather than scattering with a host-side gather.
+-            n = idx_mapping.shape[0]
+-            if n:
+-                _scatter_num_accepted_kernel[(n,)](
+-                    idx_mapping, num_sampled, self.num_accepted_tokens_gpu
+-                )
++            _scatter_num_accepted_kernel[(num_reqs,)](
++                idx_mapping, num_sampled, self.num_accepted_tokens_gpu
++            )
+         else:
+             # Fill with single value.
+-            self.num_accepted_tokens_gpu.index_fill_(
+-                0, idx_mapping, max(num_sampled, 1)
++            _fill_num_accepted_kernel[(num_reqs,)](
++                idx_mapping, self.num_accepted_tokens_gpu, max(num_sampled, 1)
+             )
+ 
+         # Align: save the running state to the block-aligned position when
+@@ -317,15 +319,13 @@ def postprocess_state(
+             and num_computed_tokens is not None
+             and self._mamba_ctx is not None
+         ):
+-            num_reqs = idx_mapping.shape[0]
+-            if num_reqs:
+-                self._mamba_ctx.run_fused_postprocess_align(
+-                    num_reqs,
+-                    self.num_accepted_tokens_gpu,
+-                    self._mamba_state_idx_gpu,
+-                    num_computed_tokens,
+-                    idx_mapping,
+-                )
++            self._mamba_ctx.run_fused_postprocess_align(
++                num_reqs,
++                self.num_accepted_tokens_gpu,
++                self._mamba_state_idx_gpu,
++                num_computed_tokens,
++                idx_mapping,
++            )
+ 
+ 
+ @triton.jit
+@@ -340,3 +340,16 @@ def _scatter_num_accepted_kernel(
+         return
+     num_sampled = tl.load(num_sampled_ptr + row)
+     tl.store(num_accepted_ptr + req_state_idx, tl.maximum(num_sampled, 1))
++
++
++@triton.jit
++def _fill_num_accepted_kernel(
++    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
++    num_accepted_ptr,  # [max_num_reqs]
++    num_sampled,
++):
++    row = tl.program_id(0)
++    req_state_idx = tl.load(idx_mapping_ptr + row)
++    if req_state_idx < 0:
++        return
++    tl.store(num_accepted_ptr + req_state_idx, num_sampled)

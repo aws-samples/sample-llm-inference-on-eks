@@ -1,0 +1,73 @@
+# vllm-efa-kimi-k3:kimi-k3-efa1.49 + upstream vLLM PR #50327 backported.
+# Temporary stopgap — see docs/MODEL-INDEX.md and k8s-manifest/lws/README.md.
+#
+# WHY: with PP>1, any request whose input exceeds --max-num-batched-tokens is
+# chunk-prefilled, and every chunk boundary after the first throws
+#   IndexError: index_fill_(): Expected dtype int64 for index
+#   at vllm/v1/worker/gpu/model_states/mamba_hybrid.py:314 postprocess_state
+# Fired 1,280 times during a 128K-ISL benchmark on the TP8PP3 shape 2026-08-09,
+# which is why long-context numbers for this shape do not exist yet. Requests
+# still return HTTP 200 and the engine survives, so this is silent: the KDA
+# state update is skipped and the engine keeps going.
+#
+# Root cause (read from the running image, not inferred): idx_mapping is created
+# int32 (vllm/v1/worker/gpu/input_batch.py:114 torch.arange(..., dtype=torch.int32))
+# and torch.index_fill_ accepts only int64 indices. The scalar branch is reached
+# because model_runner.py:1445 passes a literal 0 for num_sampled on non-final
+# prefill chunks. The sibling tensor branch already used a Triton kernel, which
+# handles int32 natively — the scalar branch was simply missed.
+#
+# UPSTREAM STATUS, checked 2026-08-09:
+#   issue https://github.com/vllm-project/vllm/issues/50947  — still OPEN
+#   fix   https://github.com/vllm-project/vllm/pull/50327    — MERGED 2026-08-03,
+#         commit e578de311c2416e66c6a8b9819586bb91de10f9d
+#   latest stable v0.26.0 was released 2026-07-27, i.e. SEVEN DAYS BEFORE the fix
+#   merged. Verified by reading the file at that tag: v0.26.0 still has the
+#   index_fill_ call. No released version carries this fix. Hence backporting a
+#   single upstream commit rather than moving to a release or to nightly.
+#
+# The patch is upstream's own diff, not a local rewrite: it replaces index_fill_
+# with a new _fill_num_accepted_kernel (Triton, eats int32 directly) and hoists
+# the num_reqs==0 early-return. Verified before building: the patch applies to
+# this image with zero fuzz and zero offset, and the resulting postprocess_state,
+# _fill_num_accepted_kernel and _scatter_num_accepted_kernel are byte-identical
+# to vllm-project/vllm main.
+#
+# ⚠️ SCOPE OF THIS FIX: it stops the exception, so the KDA state hand-off now
+# actually runs instead of being skipped. Whether long-context OUTPUT QUALITY is
+# correct is a SEPARATE, UNVERIFIED question — the previous behaviour silently
+# skipped that state update, so this changes engine behaviour on the long-context
+# path. Validate correctness (e.g. needle-in-a-haystack over a >4096-token input)
+# BEFORE trusting any long-context performance number from this image.
+#
+# Build (must be amd64 — the K3 base is multi-arch and buildx would happily
+# produce an arm64 image that cannot run on p5en):
+#   docker build --platform linux/amd64 -f Dockerfile.efa-vllm-kimi-k3-p50327 \
+#     -t <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/vllm-efa-kimi-k3:kimi-k3-efa1.49-p50327 .
+FROM <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/vllm-efa-kimi-k3:kimi-k3-efa1.49
+
+ARG VLLM_SITE=/usr/local/lib/python3.12/dist-packages
+
+COPY vllm-50327-mamba-hybrid-int32.patch /tmp/
+
+# --forward is deliberately NOT passed: if a future base image already carries
+# the fix, patch reports "Reversed (or previously applied)" and fails the build,
+# rather than silently reversing it. -p1 strips the diff's a/ b/ prefixes so the
+# path resolves against the site-packages root.
+RUN cd ${VLLM_SITE} \
+    && patch -p1 --no-backup-if-mismatch < /tmp/vllm-50327-mamba-hybrid-int32.patch \
+    && rm /tmp/vllm-50327-mamba-hybrid-int32.patch
+
+# Fail the build, not the benchmark: assert the bad call is gone, the new kernel
+# is present, and the module still imports (a Triton syntax slip would otherwise
+# only surface at the first chunk-prefill request, mid-run).
+RUN cd ${VLLM_SITE} \
+    && ! grep -q 'index_fill_' vllm/v1/worker/gpu/model_states/mamba_hybrid.py \
+    && grep -q '_fill_num_accepted_kernel' vllm/v1/worker/gpu/model_states/mamba_hybrid.py \
+    && python3 -c 'import ast,sys; ast.parse(open("vllm/v1/worker/gpu/model_states/mamba_hybrid.py").read())' \
+    && echo 'PR #50327 backport OK'
+
+# EFA userspace comes from the base image; re-assert it survived this layer.
+RUN test -f /opt/amazon/aws-ofi-nccl/lib/libnccl-net-ofi.so \
+    && test -f /opt/amazon/efa/lib/libfabric.so.1 \
+    && echo 'EFA userspace still OK'
