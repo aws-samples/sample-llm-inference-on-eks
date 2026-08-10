@@ -165,7 +165,10 @@ $(terraform output -raw configure_kubectl)
 
 This stack creates its own GPU NodePool, so **skip**
 `kubectl apply -f k8s-manifest/infra/nodepool.yaml` and continue to
-[Quick Start](#quick-start). See
+[Quick Start](#quick-start). It can also install an optional
+[LiteLLM gateway and Langfuse](infrastructure/terraform/README.md#litellm--langfuse--opt-in)
+(`enable_litellm` / `enable_langfuse`, independent, both off by default) to put
+one OpenAI-compatible endpoint and request tracing in front of the models. See
 [infrastructure/terraform/README.md](infrastructure/terraform/README.md) for the
 full variable table, teardown, and design notes.
 

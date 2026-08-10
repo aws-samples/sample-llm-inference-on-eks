@@ -1,0 +1,67 @@
+langfuse:
+  salt:
+    value: "${salt}"
+  nextauth:
+    # ClusterIP-only deployment: this must match how you actually reach the UI,
+    # so it assumes `kubectl port-forward svc/langfuse-web 3000:3000`. Behind an
+    # Ingress, set it to the external URL or NextAuth callbacks break.
+    url: http://localhost:3000
+    secret:
+      value: "${nextauth_secret}"
+  encryptionKey:
+    value: "${encryption_key}"
+
+  # Headless init: provision org/project/admin user on first boot. The project
+  # API keys are only seeded when LiteLLM is also deployed — Terraform generates
+  # the pair so LiteLLM's callback config works before Langfuse has booted.
+  # Without LiteLLM, generate keys in the UI for your own SDK clients.
+  additionalEnv:
+  - name: LANGFUSE_INIT_ORG_ID
+    value: default-org
+  - name: LANGFUSE_INIT_ORG_NAME
+    value: Default Org
+  - name: LANGFUSE_INIT_PROJECT_ID
+    value: default-project
+  - name: LANGFUSE_INIT_PROJECT_NAME
+    value: Default Project
+%{ if seed_project_keys ~}
+  - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+    value: "${langfuse_public_key}"
+  - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+    value: "${langfuse_secret_key}"
+%{ endif ~}
+  - name: LANGFUSE_INIT_USER_EMAIL
+    value: "${admin_email}"
+  - name: LANGFUSE_INIT_USER_NAME
+    value: Admin
+  - name: LANGFUSE_INIT_USER_PASSWORD
+    value: "${admin_password}"
+
+  # ClusterIP + port-forward, matching every Service in k8s-manifest/. This
+  # stack has enable_aws_load_balancer_controller = false and no external-dns,
+  # so an Ingress here would never get an address.
+  ingress:
+    enabled: false
+
+postgresql:
+  auth:
+    password: "${postgres_password}"
+
+clickhouse:
+  auth:
+    password: "${clickhouse_password}"
+  # Single-node ClickHouse: no HA, no keeper quorum. Enough for tracing a demo
+  # cluster's traffic, not sized for production ingest.
+  replicaCount: 1
+  clusterEnabled: false
+  resourcesPreset: medium
+  zookeeper:
+    enabled: false
+
+redis:
+  auth:
+    password: "${redis_password}"
+
+s3:
+  auth:
+    rootPassword: "${s3_root_password}"

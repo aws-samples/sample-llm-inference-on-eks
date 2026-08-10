@@ -19,6 +19,17 @@ else
   # so leaving them up just means Pending pods once the nodes are gone.
   kubectl delete leaderworkersets --all --all-namespaces --ignore-not-found || true
 
+  # LiteLLM / Langfuse also before the NodePools. Helm leaves StatefulSet PVCs
+  # behind by design, and the EBS CSI controller that has to delete the gp3
+  # volumes runs on a Karpenter node — so this has to happen while nodes still
+  # exist, or the volumes leak as orphaned EBS. No-op when the releases were
+  # never installed (enable_litellm / enable_langfuse = false leave them at
+  # count 0).
+  for release in helm_release.litellm helm_release.langfuse; do
+    terraform destroy -target="$release" -auto-approve || true
+  done
+  kubectl delete namespace litellm langfuse --ignore-not-found || true
+
   # Deleting the NodePools drains and terminates every Karpenter node. Without
   # this the EKS destroy blocks on nodes it doesn't own.
   kubectl delete nodepool --all --ignore-not-found || true

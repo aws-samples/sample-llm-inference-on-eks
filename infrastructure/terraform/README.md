@@ -30,6 +30,7 @@ with zero EC2 nodes; every worker node is provisioned on demand by Karpenter.
 | `eks.tf` | EKS module v21, Fargate profiles, core EKS add-ons, `gp3` default StorageClass |
 | `karpenter.tf` | Karpenter module + Helm releases, EC2NodeClasses / NodePools / FlowSchemas |
 | `addons.tf` | `eks-blueprints-addons` (EBS CSI, metrics-server, node monitoring agent), Pod Identity associations, NVIDIA GPU Operator, AWS EFA device plugin, LeaderWorkerSet controller |
+| `litellm-langfuse.tf` | Opt-in LiteLLM gateway + Langfuse observability, generated secrets, LiteLLM's Bedrock Pod Identity |
 | `kubernetes/` | Helm value overrides and raw manifests consumed by the above |
 | `cleanup.sh` | Ordered `terraform destroy` (nodes → add-ons → EKS → everything else) + orphaned ELB SG cleanup |
 
@@ -81,6 +82,10 @@ Installed by default:
 - **NVIDIA GPU Operator** `v26.3.0` — gated by `enable_gpu_operator`. Driver and `nvidia-container-toolkit` are **disabled** because the AL2023 NVIDIA AMI ships them; the Operator only provides the device plugin + GPU Feature Discovery. It depends on `kubectl_manifest.karpenter_node_pool` because its pods need a real (non-Fargate) node.
 - **AWS EFA device plugin** `v0.5.30` — gated by `enable_aws_efa_device_plugin`, required by the multi-node [`lws/`](../../k8s-manifest/lws) examples. No affinity override: the chart's own `supportedInstanceLabels` already enumerates every EFA-capable instance type.
 - **LeaderWorkerSet (LWS)** `v0.9.0` — gated by `enable_lws` (**on** by default). Installs the `LeaderWorkerSet` CRD + controller into `lws-system` from `oci://registry.k8s.io/lws/charts`; this is the controller the multi-node [`lws/`](../../k8s-manifest/lws) examples need, so a cluster built here can apply them directly. Chart defaults are kept: internal cert management (no cert-manager in this stack), `enablePrometheus=false`, and no tolerations, so the controller lands on the `default` NodePool instead of a tainted GPU node. Like the GPU Operator it depends on `kubectl_manifest.karpenter_node_pool` — the controller requests 1 CPU / 1Gi and there is no Fargate profile for `lws-system`.
+
+Opt-in via variable:
+
+- **LiteLLM** and **Langfuse** — two independent flags, `enable_litellm` and `enable_langfuse`, both **off** by default. See [below](#litellm--langfuse--opt-in).
 
 Wired but **off** (flip the flag in `addons.tf` to enable):
 
@@ -134,6 +139,8 @@ cp dev.auto.tfvars.example dev.auto.tfvars   # git-ignored
 | `enable_gpu_operator` | `false` | Install the NVIDIA GPU Operator — **set `true` for GPU serving** |
 | `enable_aws_efa_device_plugin` | `false` | Install the AWS EFA device plugin — **set `true` for the multi-node `lws/` examples** |
 | `enable_lws` | `true` | Install the LeaderWorkerSet controller (needed by the multi-node `lws/` examples) |
+| `enable_litellm` | `false` | Install the [LiteLLM gateway](#litellm--langfuse--opt-in) |
+| `enable_langfuse` | `false` | Install [Langfuse](#litellm--langfuse--opt-in) observability |
 | `enable_capacity_reservation` | `false` | Provision the ODCR NodeClass + NodePool |
 | `capacity_reservation_id` | `null` | Required when `enable_capacity_reservation = true` |
 | `slack_api_url` | placeholder | Alertmanager Slack webhook (only used when kube-prometheus-stack is enabled) |
@@ -225,6 +232,114 @@ spec:
 > block, consider managing its NodeClass/NodePool with `kubectl` outside
 > Terraform so you can tear it down without touching state.
 
+## LiteLLM + Langfuse — opt-in
+
+[LiteLLM](https://docs.litellm.ai/) is a gateway that fronts your models;
+[Langfuse](https://langfuse.com/) is an LLM observability backend. They are
+**two independent flags** — each is useful on its own — and both are off by
+default, since nothing in `k8s-manifest/` requires either.
+
+| Variable | Chart | Version | Namespace |
+|---|---|---|---|
+| `enable_litellm` | `oci://ghcr.io/berriai/litellm-helm` | `1.93.0` | `litellm` |
+| `enable_langfuse` | `https://langfuse.github.io/langfuse-k8s` | `1.5.39` | `langfuse` |
+
+**`enable_litellm`** gives you:
+
+- **One OpenAI-compatible endpoint** for both the self-hosted models in
+  [`k8s-manifest/`](../../k8s-manifest) and Bedrock, with virtual keys, per-key
+  spend tracking and rate limits.
+- **Bedrock access without static credentials** — an EKS Pod Identity
+  association binds the `litellm` ServiceAccount to a role allowing
+  `bedrock:InvokeModel[WithResponseStream]`, scoped to `anthropic.*` foundation
+  models and inference profiles. boto3's default chain picks it up.
+
+**`enable_langfuse`** gives you a tracing backend with a seeded org, project and
+admin user. On its own it traces nothing automatically — point your own
+SDK-instrumented app at it with keys you create in the UI.
+
+**Both together** additionally wire the integration up for you: LiteLLM gets
+`success_callback` / `failure_callback` set to `langfuse` plus `LANGFUSE_HOST`
+and a key pair, and Langfuse gets that same pair seeded via
+`LANGFUSE_INIT_PROJECT_*`. Terraform generates the keys rather than reading them
+back, so the wiring holds on first boot with no UI steps. With only
+`enable_litellm`, the callbacks and the `LANGFUSE_*` env block are omitted
+entirely — a `langfuse` callback pointing at a host that doesn't exist would
+make every request log callback errors.
+
+### Access
+
+Both are **ClusterIP only**, matching every Service in `k8s-manifest/`. This
+stack ships with `enable_aws_load_balancer_controller = false` and no
+external-dns, so an Ingress would never get an address. Use port-forward — each
+block applies only if you enabled that half:
+
+```bash
+# LiteLLM gateway (OpenAI-compatible) — enable_litellm
+kubectl port-forward -n litellm svc/litellm 4000:4000
+terraform output -raw litellm_master_key    # the Bearer token / api_key
+
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $(terraform output -raw litellm_master_key)" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}'
+
+# Langfuse UI — enable_langfuse. With both enabled, LiteLLM's traces land under
+# the seeded "Default Project".
+kubectl port-forward -n langfuse svc/langfuse-web 3000:3000
+terraform output -json langfuse_admin_login
+```
+
+The `litellm_*` and `langfuse_*` outputs return `null` when their half is off.
+
+To expose either publicly instead, enable the ALB controller, set
+`ingress.enabled: true` in the relevant `kubernetes/*/values.yaml`, and for
+Langfuse also set `langfuse.nextauth.url` to the external URL — NextAuth
+callbacks break if it doesn't match the URL you actually browse to.
+
+### Configuring models
+
+`kubernetes/litellm/values.yaml` holds the `proxy_config.model_list`. Only the
+Bedrock entries are listed by default — which self-hosted models exist depends on
+what you applied from `k8s-manifest/`, so add one entry per deployed model:
+
+```yaml
+- model_name: <name-clients-use>
+  litellm_params:
+    model: openai/<the --served-model-name value>
+    api_base: http://<service>.<namespace>.svc.cluster.local/v1
+    api_key: dummy   # this repo's manifests serve without auth
+```
+
+`model:` is `openai/` plus the manifest's `--served-model-name`; `api_base` is the
+model Service's in-cluster FQDN. Every Service in `k8s-manifest/` is ClusterIP,
+and the OpenAI-compatible one listens on port 80 — for the prefill/decode
+(`-pd-`) manifests that is the **router** Service, not the per-role ones on
+30000/30001. Bedrock model IDs must exist in your region — check with
+`aws bedrock list-inference-profiles --region <region>`. If you add a non-Anthropic
+provider, widen the IAM `resources` in `litellm-langfuse.tf` to match.
+
+### Caveats
+
+- **Secrets are generated by Terraform and stored in state in plaintext**
+  (master key, Postgres/ClickHouse/Redis/MinIO passwords, Langfuse keys). The
+  state already holds the cluster's IAM wiring, so this is consistent with the
+  rest of the stack — but if your state isn't treated as sensitive, move them to
+  Secrets Manager and use the charts' `existingSecret` / `secretKeyRef` options.
+- **Not production-sized.** Each chart runs its own bundled datastores — LiteLLM
+  a single Postgres (1 StatefulSet), Langfuse a single-node ClickHouse with no
+  keeper quorum plus Postgres, Redis and MinIO (4 more). Langfuse is by far the
+  heavier of the two. Use external managed datastores for anything real.
+- Both use `wait = false` — the ClickHouse/Postgres StatefulSets and LiteLLM's
+  Prisma migration Job take minutes and nothing in the apply sequences behind
+  them. `terraform apply` returning does not mean the pods are Ready.
+- Both depend on `kubectl_manifest.karpenter_node_pool` and the `gp3`
+  StorageClass: there is no Fargate profile for these namespaces, and the PVCs
+  specify no `storageClassName`.
+- **Enabling Langfuse after LiteLLM is already running replaces the LiteLLM
+  release**, because the callback config and `LANGFUSE_*` env block get added to
+  its values. Expect the proxy pods to restart.
+
 ## Operations
 
 ```bash
@@ -245,6 +360,11 @@ kubectl get ds -n kube-system aws-efa-k8s-device-plugin
 kubectl get deploy -n lws-system lws-controller-manager
 kubectl get leaderworkersets -A
 
+# LiteLLM / Langfuse (when enable_litellm / enable_langfuse = true)
+kubectl get pods -n litellm
+kubectl get pods -n langfuse
+kubectl logs -n litellm -l app.kubernetes.io/name=litellm
+
 # Check an ODCR before enabling it
 aws ec2 describe-capacity-reservations --capacity-reservation-ids cr-xxxxxxxxxxxxxxxxx
 ```
@@ -256,7 +376,9 @@ AWS_PROFILE=<profile> ./cleanup.sh
 ```
 
 Order matters, which is why this isn't a bare `terraform destroy`: the script
-deletes cluster Ingresses, any LeaderWorkerSets, and the Karpenter NodePools (so
+deletes cluster Ingresses, any LeaderWorkerSets, the LiteLLM/Langfuse releases
+and their namespaces (their PVCs must be deleted while the EBS CSI controller
+still has a node to run on, or the volumes leak), and the Karpenter NodePools (so
 nodes drain first), destroys `module.eks_blueprints_addons` then `module.eks`,
 deletes ELB-controller-created security groups left behind, then destroys the
 remainder.
