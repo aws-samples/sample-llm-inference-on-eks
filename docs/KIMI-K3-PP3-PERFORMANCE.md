@@ -10,12 +10,15 @@ For *why* this topology rather than TP24 or PP2, see
 deployment see [KIMI-K3-B300-PERFORMANCE.md](KIMI-K3-B300-PERFORMANCE.md).
 
 > [!WARNING]
-> **Read these three limits before quoting any number below.**
+> **Read these limits before quoting any number below.**
 >
-> 1. **Full 1M context was never exercised.** The engine starts and serves at
->    `--max-model-len 1048576`, and retrieval was verified at **91,700 tokens**.
->    The span from 91.7K to 1M is unverified. Concurrency at a full 1M window
->    (6, § 6) is the engine's own arithmetic, not a measurement.
+> 1. **A 1,048,576-token window is servable but not interactively usable.**
+>    Measured 2026-08-12: a **1,037,947-token** request returned the correct answer
+>    with 5 of 5 needles recalled, and its TTFT was **126.1 s** — 94% of end-to-end
+>    latency. That cost is paid on *every* request, because this model cannot use
+>    prefix caching (§ 3.1). Treat the full window as a **batch-only** capability.
+>    The usable ceiling for a product is **128,000 tokens** (TTFT 8.44 s) and the
+>    comfortable ceiling is **31,999 tokens** (2.24 s) — see § 4.1 for the curve.
 > 2. **Output length fell short of the request at every point.**
 >    `output_sequence_length` came out 630–650 against 1024 requested (and 246–248
 >    against 256) despite `ignore_eos:true`. The decode phase is therefore ~37%
@@ -70,14 +73,29 @@ Per-GPU, as reported by the engine at `--gpu-memory-utilization 0.93`:
 | peak activation (profiled) | 1.29–2.19 GiB |
 | KV cache | ~63.6 GiB |
 
-Engine-reported KV pool: **6,361,156 tokens**, block size 384. That is
-**16,565 blocks**, and a 1M request costs `cdiv(1048576, 384) + 1 = 2,732` blocks
-(the `+1` is the fixed KDA state block; see
-[KIMI-K3-PP-TOPOLOGY.md](KIMI-K3-PP-TOPOLOGY.md) § 4). Hence the engine's own line:
+Engine-reported KV pool: **6,361,156 tokens**, block size 384. A full-window request
+costs `cdiv(1048576, 384) + 1 = 2,732` blocks (the `+1` is the fixed KDA state block;
+see [KIMI-K3-PP-TOPOLOGY.md](KIMI-K3-PP-TOPOLOGY.md) § 4). The pool holds roughly
+16,574 blocks — *roughly*, because that token figure is itself derived rather than
+physical and cannot be divided by the block size to recover a count; see the note in
+[KIMI-K3-PP-TOPOLOGY.md](KIMI-K3-PP-TOPOLOGY.md) § 6. Hence the engine's own line:
 
 ```
 Maximum concurrency for 1,048,576 tokens per request: 6.07x
 ```
+
+That figure is **KV capacity arithmetic computed once at startup, not an
+achievable concurrency**. It is derived, not physical: `kv_cache_utils.py:958`
+divides `num_blocks` by the per-request block total, and the token figure on the
+line above it is then back-computed as `max_concurrency × max_model_len`
+(`:2227`) — so do not divide 6,361,156 by 384 to recover a block count, it does
+not yield an integer. Measured behaviour at a full window differs from the
+figure in both directions: the scheduler kept only 2–4 requests resident (KV peak
+42.5–65.8%) rather than 6, and output quality degraded as concurrency rose past
+2 — control tokens leaked into the text at 4 concurrent requests and the text
+collapsed at 6. **Cause not established**; it is unrelated to the § 3 crash
+(`IndexError` count stayed 0) and no preemption occurred. Anything above 2
+concurrent full-window requests is unvalidated.
 
 ## 3. A chunk-prefill crash blocks long context on stock images
 
@@ -128,6 +146,45 @@ temperature-0 retrieval test. It shows long-context attention functions on the
 chunk-prefill path; it is **not** a general output-quality evaluation and does not
 rule out degradation on other axes.
 
+### 3.1 Prefix caching is unavailable, so every request repays the full prefill
+
+This is the single fact that decides whether a long window is practical, and it is
+easy to miss because nothing in the manifest turns it off.
+
+vLLM's own default is on (`vllm/config/cache.py:93`, `enable_prefix_caching: bool =
+True`), yet this deployment reports `enable_prefix_caching=False` and
+`Prefix cache hit rate: 0.0%` for the entire life of the process. The matching
+force-disable path is:
+
+```python
+# vllm/v1/engine/core.py:268-272
+if vllm_config.cache_config.enable_prefix_caching:
+    logger.info("Disabling prefix caching: model has non-causal attention layers.")
+    vllm_config.cache_config.enable_prefix_caching = False
+```
+
+K3's 69 KDA layers hold a recurrent state, so a decode token's KV is not a pure
+causal function of the prefix and cannot be reused across requests.
+
+⚠️ **Inference, not confirmation:** the `Disabling prefix caching` line was not
+found in this deployment's startup log. What is confirmed is
+`enable_prefix_caching=False` in the engine config dump and a 0.0% hit rate
+throughout. Two other force-disable paths exist in this vLLM
+(`models/config.py:166`, Unlimited-OCR-specific; `mla_attention.py:479`, for
+TRITON_MLA/FLASHINFER under batch invariance) and **neither matches this
+configuration** — this one runs FLASHMLA. Confirming the exact path needs the log
+line or a debugger.
+
+**Consequence for deployment.** "Load a large document once, then ask many
+questions" — the main real use for a huge window — does not work here: each
+follow-up question repays the full prefill, so a 1,037,947-token document costs
+126.1 s *per turn*, not once.
+
+**A flag that does not do what it looks like:** the single-node B300 manifest
+(`k8s-manifest/vllm/kimi-k3-p6-b300-vllm.yaml`) passes
+`--enable-prefix-caching`. The same code path overrides it, so that flag buys
+nothing on this model. Do not copy it expecting caching.
+
 ## 4. Concurrency scaling at short context
 
 ISL 1000 / OSL 256, `--max-num-seqs 32`, stability-detected with
@@ -155,6 +212,46 @@ derived from measured throughput per point, not copied. The engine was drained t
 *topology* would need a same-node-count TP24 vs TP8×PP3 A/B, and TP24 cannot start
 at all ([KIMI-K3-PP-TOPOLOGY.md](KIMI-K3-PP-TOPOLOGY.md) § 2). **Cause not
 established.**
+
+### 4.1 TTFT against context length — where the usable ceiling is
+
+Measured 2026-08-12, concurrency 1, OSL 256 requested, `--request-count 3` per
+point, engine drained to idle between points. Concurrency 1 is the right lens here:
+§ 3.1 means every request repays its full prefill, so the single-request floor is
+what a user actually experiences. The 1,030,004 row comes from the same sweep at
+OSL 1024.
+
+| ISL | TTFT p50 | ITL p50 | end-to-end p50 | per-user tok/s | prefill tok/s |
+|---:|---:|---:|---:|---:|---:|
+| 7,999 | **0.87 s** | 17.48 ms | 5.33 s | 57.20 | 9,174 |
+| 31,999 | **2.24 s** | 17.90 ms | 6.80 s | 55.98 | 14,317 |
+| 128,000 | **8.44 s** | 18.46 ms | 13.15 s | 54.17 | 15,165 |
+| 262,001 | **19.19 s** | 19.35 ms | 24.13 s | 51.67 | 13,652 |
+| 524,002 | **47.00 s** | 20.97 ms | 52.32 s | 47.64 | 11,150 |
+| 1,030,004 | **126.1 s** | 24.07 ms | 135.1 s | 41.53 | 8,168 |
+
+**TTFT grows faster than context.** Each doubling costs 2.3–2.7× the TTFT, and
+prefill throughput peaks at **15,165 tok/s around 128,000 tokens** then falls to
+8,168 at 1,030,004 — a 46% decline. Attention cost rising with sequence length is
+the expected explanation but was **not isolated here**; no profiling was run.
+
+**ITL is nearly independent of context length** — 17.48 ms at 7,999 tokens versus
+24.07 ms at 1,030,004, only 38% worse across a 129× range. Decode speed is not the
+problem at long context; the entire cost is in the first token. (Contrast the ITL
+blow-up to 1,305.79 ms seen at a full window with 6 concurrent requests — that is a
+concurrency effect, not a length effect.)
+
+Reading the curve for deployment:
+
+| ISL | TTFT p50 | Suitability |
+|---|---|---|
+| ≤ 31,999 | ≤ 2.24 s | interactive chat |
+| 128,000 | 8.44 s | acceptable — practical ceiling for document Q&A |
+| 262,001 | 19.19 s | needs a progress indicator |
+| ≥ 524,002 | ≥ 47 s | batch only |
+
+Same caveats as § 5: 3 requests/slot, single window, so these are capability
+probes and not steady-state figures.
 
 ## 5. Peak aggregate throughput: ≥2,169 tok/s, not saturated
 
@@ -215,26 +312,34 @@ at all of 32 / 128 / 512.
 
 It does cost a little KV, and the relationship is linear rather than noise:
 
-| `--max-num-seqs` | KV pool (tokens) | vs 32 |
-|---:|---:|---:|
-| 32 | 6,361,156 | — |
-| 128 | 6,355,029 | −6,127 (−0.10%) |
-| 512 | 6,319,795 | −41,361 (−0.65%) |
+| `--max-num-seqs` | KV pool (tokens) | vs 32 | vs the line below |
+|---:|---:|---:|---:|
+| 5 | 6,363,454 | +2,298 | 0.0004% |
+| 32 | 6,361,156 | — | fitted |
+| 128 | 6,355,029 | −6,127 (−0.10%) | 0.034% |
+| 512 | 6,319,795 | −41,361 (−0.65%) | fitted |
 
-A least-squares fit gives `KV ≈ 6,363,913 − 86.2 × max_num_seqs` tokens, and the
-middle point sits on that line to within 0.034% — too regular to be measurement
-noise. **The mechanism is not established.** 86 tokens/slot is ~900 KB of HBM per
-slot, three orders of magnitude more than the O(`max_num_seqs`) bookkeeping tensors
-that are easy to point at (e.g. `num_accepted_tokens_gpu`, an int32 array of
-`max_num_reqs`, `mamba_hybrid.py:75-77`). A per-request block table would be the
-right order of magnitude at 1M context, but that was **not verified**.
+Fitting the two extremes 32 and 512 gives `KV ≈ 6,363,913 − 86.17 × max_num_seqs`
+tokens. The other two points land on that line to within **0.034% and 0.0004%** —
+and the `max_num_seqs=5` point came from a **separate deployment** on a different
+day (a cold start that accidentally used a stale rendered manifest), so the
+relationship reproduces across process restarts rather than being an artifact of one
+boot. Too regular to be measurement noise.
 
-Practical consequence: the cost is irrelevant at short context and **relevant at
-1M**, where the whole pool only affords 6 concurrent requests. Do not leave
-`--max-num-seqs` at a large value on a 1M deployment; 41,361 tokens is a
-noticeable fraction of one request's budget. The committed manifest ships 32 as a
-serving default — 512 is where the ≥2,169 tok/s figure came from, and is not the
-default because of the per-user latency above.
+**The mechanism is still not established.** 86 tokens/slot works out to roughly
+900 KB of HBM per slot, three orders of magnitude more than the O(`max_num_seqs`)
+bookkeeping tensors that are easy to point at (e.g. `num_accepted_tokens_gpu`, an
+int32 array of `max_num_reqs`, `mamba_hybrid.py:75-77`). A per-request block table
+would be the right order of magnitude at a 1M window, but that was **not
+verified** — no allocation was traced.
+
+Practical consequence: the cost is irrelevant at short context, and only marginal
+even at a full window — at 512 it costs 41,361 tokens, about 4% of one 1,048,576-token
+request's budget. There is no reason to raise it on a full-window deployment though,
+since concurrency there is capped at 2 by output quality (§ 2) long before KV runs
+out. The committed manifest ships 32 as a serving default — 512 is where the
+≥2,169 tok/s figure came from, and is not the default because of the per-user latency
+above.
 
 ## 7. Long context: 128K measured
 
@@ -261,7 +366,7 @@ Set against § 5, the same server delivers **≥2,169 tok/s at ISL 1000 and 47.1
 at ISL 128K — a 46× spread.** Any single-number claim about "output capacity" must
 name its input length.
 
-### 7.1 Prefill and decode alternate in long phases — cause not established
+### 7.1 Prefill and decode alternate in long phases
 
 Engine logs at 128K, sampled every 10 s:
 
@@ -272,36 +377,46 @@ prefill=0.0      gen=145.3     prefill=25604.2  gen=4.5
 prefill=12801.6  gen=3.3       prefill=0.0      gen=200.4
 ```
 
-Two strictly alternating regimes on a **~50–60 s period**: during prefill, decode
-collapses to 3.2–3.4 tok/s; during decode, prefill is exactly 0.0. The prefill rate
-is pinned near 12,801 tok/s.
+Decode collapses to 3.2–3.4 tok/s while `prefill` reads non-zero, and `prefill`
+reads exactly 0.0 while decode runs at ~200 tok/s.
 
-**A plausible explanation that measurement refuted.** The scheduler shares one
-per-step token budget between running and waiting requests
-(`vllm/v1/core/sched/scheduler.py:110-114`, `:454`, `:480`, `:518`), so on paper a
-single 128K prefill chunk consuming all 4096 would starve every other request's
-1-token decode. Raising `--max-num-batched-tokens` 4096 → 16384 as a controlled A/B
-**disproved that**:
+> [!CAUTION]
+> **`Avg prompt tput` is not a rate — do not read it as one.** It is the prompt
+> tokens of prefills that *completed* inside the 10 s reporting window, divided by
+> 10 s, so it quantises to multiples of ISL/10. Verified against three observed
+> values, to within 0.002%:
+>
+> | observed | ISL × completions / 10 s |
+> |---|---|
+> | 12,801.9 | 128,019 × 1 / 10 |
+> | 25,604.2 | 128,019 × 2 / 10 |
+> | 103,790.2 | 1,037,925 × 1 / 10 |
+>
+> So `prefill=0.0` does **not** mean prefill stopped — a 1,030,004-token prefill
+> spans a dozen windows and reports 0.0 in all but the last. And the "pinned"
+> 12,801.x is just one 128K prompt finishing per window.
+
+**A retracted conclusion.** An earlier version of this section argued that because
+raising `--max-num-batched-tokens` 4096 → 16384 left the prefill figure unchanged at
+~12,801, *something other than that flag must cap per-step tokens*. **That inference
+is withdrawn** — the figure was never a rate, so it could not have responded to a
+budget change. No evidence here supports an unknown per-step cap.
+
+What the same A/B did establish, from independent measurements, is that 16384 is a
+net loss on this shape, and it was reverted for these reasons:
 
 | | 4096 | 16384 |
 |---|---|---|
-| prefill throughput | ~12,801 tok/s | **~12,801 tok/s — unchanged** |
-| alternation period | ~50–60 s | **~50–60 s — unchanged** |
-| decode during prefill | 3.2–3.4 tok/s | **0.7–0.9 tok/s — worse** |
 | peak activation | 1.29–2.19 GiB | 4.49 GiB |
 | KV pool | 6,361,156 tokens | 5,485,683 (−13.8%) |
+| decode during prefill | 3.2–3.4 tok/s | 0.7–0.9 tok/s |
 
-A 4× budget changed the prefill rate by nothing, and chunk count per request should
-have dropped 31 → 8 yet the period did not move. **Something other than that flag
-caps per-step tokens; what, is not established** — identifying it needs the PP
-microbatch scheduling path or a profiler, neither of which was run. The setting was
-reverted: 16384 is a pure loss here (less KV, slower decode, target problem
-unchanged). The identical `12801.x` under both budgets is the strongest available
-clue.
-
-`--long-prefill-token-threshold` (`scheduler.py:516-517`, default off) is the other
-upstream knob aimed at this. **Untested** — and since the budget was not the binding
-constraint, there is no particular reason to expect it to help.
+The alternation itself remains **unexplained**: the scheduler does share one
+per-step token budget across running and waiting requests
+(`vllm/v1/core/sched/scheduler.py:110-114`, `:454`, `:480`, `:518`), which would
+starve 1-token decodes behind a large prefill chunk, but that was not
+demonstrated here. `--long-prefill-token-threshold` (`scheduler.py:516-517`,
+default off) is the upstream knob aimed at this case and is **untested**.
 
 ## 8. Operational notes
 

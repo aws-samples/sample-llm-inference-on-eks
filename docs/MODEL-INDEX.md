@@ -59,8 +59,9 @@ KV-cache offload & externalization (HiCache / LMCache / Redis L2) measured in
 measured 2026-08-09 in [KIMI-K3-PP3-PERFORMANCE.md](KIMI-K3-PP3-PERFORMANCE.md),
 with the topology and KV-block reasoning in
 [KIMI-K3-PP-TOPOLOGY.md](KIMI-K3-PP-TOPOLOGY.md). Read the warning at the top of
-the performance doc first: full 1M was never exercised (retrieval verified to
-91.7K), and long context requires the patched image described below.
+the performance doc first: a full window works but costs **126.1 s of TTFT** with no
+prefix caching to amortise it, which makes it batch-only — the usable ceiling is
+around 128,000 tokens. Long context also requires the patched image described below.
 
 Args follow the official recipe's per-hardware profile —
 [b300](https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=b300) for the single-node
@@ -79,7 +80,7 @@ no EFA userspace, so cross-node NCCL would fall back to TCP.
 | 1-node TP8, vLLM — **default** | `vllm/kimi-k3-p6-b300-vllm.yaml` | 1× p6-b300.48xlarge | ✅ |
 | 2-node TP16, vLLM LWS+EFA — fallback, 29.7K context / `max-num-seqs 5` | `lws/lws-kimi-k3-tp16-p5en.yaml` | 2× p5en.48xlarge | ✅ |
 | 2-node TP8×PP2, vLLM LWS+EFA — ~2× the context of TP16 (~41K), **untested** | `lws/lws-kimi-k3-tp8pp2-p5en.yaml` | 2× p5en.48xlarge | ⚠️ |
-| 3-node TP8×PP3, vLLM LWS+EFA — serves at 1M `max-model-len`; **retrieval measured to 91.7K, full 1M unverified**; needs the stopgap image below | `lws/lws-kimi-k3-tp8pp3-p5en.yaml` | 3× p5en.48xlarge | ✅ |
+| 3-node TP8×PP3, vLLM LWS+EFA — serves a 1,048,576-token window (measured at 1,037,947 tokens), but **TTFT there is 126.1 s and no prefix caching, so a full window is batch-only**; usable ceiling ≈128,000 tokens (TTFT 8.44 s). Needs the stopgap image below | `lws/lws-kimi-k3-tp8pp3-p5en.yaml` | 3× p5en.48xlarge | ✅ |
 
 > [!IMPORTANT]
 > **The PP3 manifest pins a locally patched image, and that is a stopgap — as of

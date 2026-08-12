@@ -327,6 +327,40 @@ First response: **lengthen the interval** so each window contains more of the tr
 and re-run. A longer window costs machine time; publishing an unsettled percentile costs
 correctness, so the asymmetry favours the longer window.
 
+## The depth rule stops being economic at very long input
+
+The `≥10 requests/slot/window` target above was written for short prompts. Its cost
+scales with per-request latency, and at long context that gets out of hand: on
+Kimi-K3 TP8×PP3 (3× p5en) a single 128,000-token point took **43 minutes** of
+stability detection — four windows — because one request runs ~60 s, forcing
+≥10-minute windows. One data point cost roughly what forty short-context points cost.
+At a 1,030,004-token input a compliant window would be ≥28 minutes.
+
+For long-input work, use `--request-count` instead and **say so in the writeup**: a
+fixed count produces a single window, so ramp-up cannot be trimmed and the figures are
+capability probes rather than steady state. Never mix them into a table with
+stability-detected numbers.
+
+## `Avg prompt tput` in vLLM logs is not a rate
+
+A trap worth knowing before using engine logs as evidence. The vLLM stats line reports
+the prompt tokens of prefills that **completed** inside the 10 s reporting window,
+divided by 10 s — so the value quantises to multiples of ISL/10 and says nothing about
+instantaneous prefill speed. Verified on Kimi-K3 TP8×PP3 to within 0.002%:
+
+| observed | ISL × completions / 10 s |
+|---|---|
+| 12,801.9 | 128,019 × 1 / 10 |
+| 25,604.2 | 128,019 × 2 / 10 |
+| 103,790.2 | 1,037,925 × 1 / 10 |
+
+Two consequences. `prefill=0.0` does **not** mean prefill stopped — a long prefill
+spans many windows and reports 0.0 in all but the last. And a value that looks
+suspiciously constant across a config change is expected, not evidence: reading an
+unchanged 12,801.x as proof that a token-budget flag had no effect produced a wrong
+conclusion in this repo, later retracted
+([KIMI-K3-PP3-PERFORMANCE.md](KIMI-K3-PP3-PERFORMANCE.md) § 7.1).
+
 ## Measured basis (single rig — this is the weakness)
 
 1× L40S (g6e), Qwen3-8B TP1, sglang v0.5.13.post1, genai-perf 0.0.16.post1,

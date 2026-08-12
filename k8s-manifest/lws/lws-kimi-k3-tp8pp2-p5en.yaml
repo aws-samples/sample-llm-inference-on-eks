@@ -4,8 +4,8 @@
 # which is itself a 2-node TP8xPP2 shape, with two deliberate deviations —
 # --gpu-memory-utilization and --max-model-len. See the notes at those args.
 #
-# Deployed and load-tested 2026-08-06 on tf-eks-exp. Performance numbers and the
-# TP16-vs-PP2 comparison live in docs/, not here.
+# Deployed and load-tested 2026-08-06. Performance numbers and the TP16-vs-PP2
+# comparison live in docs/, not here.
 #
 # 1M CONTEXT WORKS ON 2 NODES — the third node is not required for it. PP shards
 # layers, so each GPU stores fewer of them and the weight footprint drops (96.49 vs

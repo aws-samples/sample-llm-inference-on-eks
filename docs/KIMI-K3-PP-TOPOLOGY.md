@@ -75,8 +75,28 @@ Worth remembering, to avoid mis-diagnosing this class of problem:
 `strategy_min_gpus` from
 [recipes.vllm.ai](https://recipes.vllm.ai/moonshotai/Kimi-K3.json) is entirely
 multiples of 8 or 16 — `single_node_tp: 8`, `multi_node_tp: 8`, `multi_node_tep: 8`,
-`multi_node_tp_pp: 16`, `multi_node_dep: 16`. The 3-node shape is a local
+`multi_node_tp_pp: 16`, `multi_node_dep: 16`, `h100: 32`. The 3-node shape is a local
 extrapolation of the `multi_node_tp_pp` profile, not a supported recipe.
+
+### Two escape routes that are closed (checked 2026-08-12)
+
+**Padding the vocabulary to a multiple of 24 is not exposed.** `padding_size` is only
+a Python argument on `VocabParallelEmbedding.__init__`
+(`vllm/model_executor/layers/vocab_parallel_embedding.py:246`, defaulting to
+`DEFAULT_VOCAB_PADDING_SIZE`); `vllm/engine/arg_utils.py` carries no CLI flag for it.
+Changing it means patching model code, not passing an argument.
+
+**Speculative decoding does not cover pipeline parallelism, and would not help a
+long window anyway.** The recipe's `spec_decoding` opt-in
+(`{"model":"Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"method":"dspark",…}`)
+lists its supported strategies as `single_node_tp`, `multi_node_tp`,
+`multi_node_tep`, `multi_node_dep`, `multi_node_tp_dp`, `pd_cluster` — **`multi_node_tp_pp`
+is absent**. Separately, speculative decoding accelerates decode, and at a full
+window TTFT is 94% of end-to-end latency
+([KIMI-K3-PP3-PERFORMANCE.md](KIMI-K3-PP3-PERFORMANCE.md) § 4.1), so even a perfect
+draft model would move the total by a few percent. Note also that a 2-node TP16 shape
+cannot reach a long window at all (29,696 tokens, § 4), so pairing TP16 with
+speculative decoding does not address long context.
 
 ## 3. 93 layers split better at PP3 than at the recipe's PP2
 
@@ -208,9 +228,21 @@ The shape ran on 2026-08-09. Comparing against
 
 | Quantity | Predicted (2026-08-06) | Measured (2026-08-09) | Error |
 |---|---|---|---|
-| blocks in pool | ~7,750 | **16,565** (6,361,156 tokens ÷ 384) | **2.1× under** |
+| blocks in pool | ~7,750 | **≈16,574** (see below) | **2.1× under** |
 | 1M concurrency | ~2.8×, discounted to ~2.5× for stage 2 | **6.07×** | 2.2–2.4× under |
 | weights/GPU | ~86.5 GiB | 68.89 GiB incl. non-torch | ~1.26× over |
+
+> [!NOTE]
+> **The block count is not directly reported, and cannot be recovered by dividing
+> the logged token figure.** An earlier revision of this table stated 16,565 blocks
+> from `6,361,156 ÷ 384` — that is exactly the mistake the § 4 note warns about, and
+> the give-away is that it does not come out an integer (16,565.5). The logged token
+> figure is itself derived: `kv_cache_utils.py:2227` computes it as
+> `max_concurrency × max_model_len`, while `:958` defines
+> `max_concurrency = num_blocks / num_blocks_per_request`. Going the other way,
+> `6.0665 × 2,732 ≈ 16,574`, but `max_concurrency` is logged to two decimals so the
+> exact integer is not recoverable from the log at all — read `num_gpu_blocks` from
+> the engine if you need it.
 
 **The qualitative conclusion was right and the quantitative estimate was
 systematically conservative.** PP3 does clear 1M with room to spare — by a wider
@@ -263,3 +295,33 @@ The 2-node TP16 baseline differs in GPU count (16 vs 24), date, and `max-num-seq
 What *was* measured is that throughput keeps scaling with concurrency well past the
 point where per-user latency becomes unacceptable — see
 [KIMI-K3-PP3-PERFORMANCE.md](KIMI-K3-PP3-PERFORMANCE.md) § 5.
+
+### 8.1 What the third node actually buys — and what it does not
+
+Framing the choice as "is TP8×PP3 the ideal way to serve a 1M window" leads
+nowhere, because **at 3 nodes it is the only shape that starts** (§ 2). The useful
+question is what the third node changes, and the measurements answer that:
+
+| | 2 nodes, TP16 | 2 nodes, TP8×PP2 | 3 nodes, TP8×PP3 |
+|---|---|---|---|
+| max context | 29,696 | 1,048,576 | 1,048,576 |
+| KV concurrency at a full window | — | 2.13× | 6.07× |
+| weights/GPU | 129.75 GiB | 96.49 GiB | 68.89 GiB |
+
+**PP, not the node count, is what unlocks a long window.** TP cannot: MLA builds KV
+with `num_kv_heads=1` (`vllm/model_executor/models/deepseek_v2.py:634`, "Only has one
+vector instead of K + V"), so KV is not TP-sharded and widening TP leaves the KV
+budget untouched. PP shards *layers*, which thins per-GPU weights and frees the memory
+KV needs. The third node buys KV headroom, not a new capability.
+
+**It does not buy usability at a full window.** TTFT at 1,030,004 tokens is 126.1 s
+and prefill cost is set by the token count, not by the parallelism strategy — 24 GPUs
+in PP3 already have more compute than 16 in TP16. Combined with prefix caching being
+unavailable on this model
+([KIMI-K3-PP3-PERFORMANCE.md](KIMI-K3-PP3-PERFORMANCE.md) § 3.1), that 126.1 s is
+repaid on every request. No topology change on this hardware class addresses it.
+
+**Where the third node is hard to justify:** if the workload lives at or below
+128,000 tokens, TP8×PP2 on 2 nodes already reaches it, and TTFT there is 8.44 s
+(§ 4.1 of the performance doc). Size the cluster from the context length the product
+actually needs, not from the model's advertised window.

@@ -3,18 +3,28 @@
 # (https://recipes.vllm.ai/moonshotai/Kimi-K3?hardware=h200 -> multi_node_tp_pp),
 # with pipeline-parallel-size and nnodes raised from the recipe's 2 to 3.
 #
-# MEASURED 2026-08-09 on 3x p5en.48xlarge in us-west-2c. Full data:
-# local/KIMI-K3-TP8PP3-1M-ANALYSIS.md sections 8.1-8.5. Headlines:
+# MEASURED 2026-08-09 and 2026-08-12 on 3x p5en.48xlarge, one AZ. Full write-up:
+# docs/KIMI-K3-PP3-PERFORMANCE.md. Headlines:
 #   - short input (ISL 1000): aggregate throughput scaled to >=2,169 tok/s at
 #     c512 and had NOT saturated; per-user speed fell to 6.8 tok/s there, so the
 #     useful band is far lower (c32-c64 for >=20 tok/s per user)
-#   - 128K input, c4: TTFT p50 11.7 s, ITL p50 49 ms, 47.1 tok/s, 0.0689 rps
-#   - retrieval verified at 91,700 tokens (3/3 needles). FULL 1M NOT MEASURED —
-#     the engine starts and serves at max-model-len 1048576, but the span from
-#     91.7K to 1M is unverified.
-#   - at a full 1M window KV caps concurrency at 6 (engine's own arithmetic:
-#     "Maximum concurrency for 1,048,576 tokens per request: 6.07x"), so
-#     --max-num-seqs is irrelevant there. NOT exercised.
+#   - the full window works but is BATCH-ONLY. A 1,037,947-token request returned
+#     correctly (5/5 needles) with TTFT 126.1 s = 94% of end-to-end latency, and
+#     that cost repeats on every request because this model cannot use prefix
+#     caching (the engine force-disables it for non-causal KDA layers,
+#     vllm/v1/engine/core.py:268-272). So "load one big document, then ask many
+#     questions" does not work here.
+#   - TTFT by input length, c1: 0.87 s @8K, 2.24 s @32K, 8.44 s @128K,
+#     19.19 s @256K, 47.00 s @512K, 126.1 s @1M. Usable ceiling for a product is
+#     ~128K; interactive comfort ends around 32K. ITL is nearly length-independent
+#     (17.48 -> 24.07 ms across that whole range) — the cost is all first-token.
+#   - the engine's "Maximum concurrency for 1,048,576 tokens per request: 6.07x"
+#     is startup KV arithmetic, NOT achievable concurrency. Measured at a full
+#     window the scheduler kept only 2-4 requests resident, and output quality
+#     degraded past 2 concurrent (control tokens leaked into the text at 4,
+#     text collapsed at 6). Cause NOT established; unrelated to the patched
+#     chunk-prefill crash below (IndexError stayed 0) and no preemption occurred.
+#     Treat 2 as the validated concurrency limit at a full window.
 #
 # 1M CONTEXT DOES NOT REQUIRE 3 NODES. TP8xPP2 on 2 nodes reaches it — measured
 # 2026-08-06. A third node buys more KV headroom and a lower per-GPU weight
