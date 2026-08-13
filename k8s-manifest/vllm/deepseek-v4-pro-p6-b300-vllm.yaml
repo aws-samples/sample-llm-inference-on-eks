@@ -1,0 +1,195 @@
+# DeepSeek-V4-Pro (1.6T total / 49B active MoE) on vLLM, single p6-b300.48xlarge
+# (8x B300 268 GB = 2144 GB VRAM).
+#
+# Engine args are the official vLLM recipe's b300 profile, taken verbatim from
+# https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Pro/hw/b300.json
+# (fetched 2026-08-13): strategy single_node_tep, variant "default", node_count 1.
+# The Tool Calling and Reasoning args are already part of that profile. Only
+# --host/--port/--served-model-name are added on top; nothing recipe-supplied
+# was changed.
+#
+# Sizing (HF API, 2026-08-13): the checkpoint is 864.7 GB across 91 files,
+# public/ungated — no HF token needed. Recipe lists vram_minimum_gb 960 for this
+# variant against 2144 GB on the node, so weights are ~120 GB/GPU at TP8 with
+# roughly 148 GB/GPU left for KV + activations.
+#
+# ⚠️ THE RECIPE CONTRADICTS ITSELF ON B300 STRATEGY. The hardware pill this
+# manifest follows (?hardware=b300) resolves to single_node_tep — TP8 + EP, which
+# is what is configured below. But the recipe's own prose guide, under
+# "Recommended deployments", says: "B300 (8x GPU): single-node DP + EP with
+# --data-parallel-size 8". Both are single-node and otherwise identical; the DEP
+# variant is published at
+# .../DeepSeek-V4-Pro/hw/b300/strategies/single_node_dep.json and differs by
+# exactly one token. To switch, replace --tensor-parallel-size=8 with
+# --data-parallel-size=8. Which one is faster here is NOT established — nobody has
+# measured either on this hardware. Note DP replicates the dense params per rank,
+# which is why the guide caps H200 DP8 at --max-model-len 800000; no such cap is
+# given for B300.
+#
+# ⚠️ --max-model-len is deliberately unset, so the engine takes the config's
+# context_length of 1,048,576. Untested here. Two pointers, not predictions:
+#   - the guide says "Think Max" needs --max-model-len >= 393216 or it truncates,
+#     so that is the floor worth keeping if you have to cap it;
+#   - on this repo's own Kimi-K3 b300 deployment a ~1M-token request CUDA-OOMed
+#     mid-prefill and the knob that mattered was --max-num-batched-tokens, not
+#     --gpu-memory-utilization (see k8s-manifest/vllm/kimi-k3-p6-b300-vllm.yaml).
+#     Different model and different weights footprint — treat it as a place to
+#     look first, not as a diagnosis.
+#
+# Speculative decoding is available but OFF: the recipe marks spec_decoding as an
+# opt-in feature and the "default" variant does not auto-enable it. MTP with 2
+# draft tokens is the supported mode for this variant; add
+#   --speculative-config={"method":"mtp","num_speculative_tokens":2}
+# to turn it on. (DSpark needs the separate DeepSeek-V4-Pro-DSpark checkpoint,
+# which the recipe flags as nightly_required.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-v4-pro-vllm
+  labels:
+    app: deepseek-v4-pro-vllm
+    engine: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepseek-v4-pro-vllm
+      engine: vllm
+  template:
+    metadata:
+      labels:
+        app: deepseek-v4-pro-vllm
+        model: deepseek-v4-pro
+        engine: vllm
+    spec:
+      priorityClassName: high-priority-100
+      nodeSelector:
+        node.kubernetes.io/instance-type: p6-b300.48xlarge
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: deepseek
+        # The recipe's b300 profile says vllm/vllm-openai:latest, which this repo
+        # does not allow. Checked on Docker Hub 2026-08-13: tag `latest` and tag
+        # `v0.27.1` resolve to the SAME digest
+        # sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+        # (built 2026-08-11), so this pin is exactly what the recipe asks for and
+        # clears the model's min_vllm_version of 0.20.0. Re-check the digest before
+        # assuming a future `latest` still matches.
+        image: vllm/vllm-openai:v0.27.1
+        imagePullPolicy: IfNotPresent
+        command: [ "vllm", "serve" ]
+        args:
+        - deepseek-ai/DeepSeek-V4-Pro
+        - --host=0.0.0.0
+        - --port=8000
+        # --- recipe model.base_args ---
+        - --trust-remote-code
+        - --kv-cache-dtype=fp8
+        - --block-size=256
+        # --- recipe strategy single_node_tep ---
+        # TP splits the dense layers, EP splits the experts. The recipe is explicit
+        # that TP must equal the GPU count here, or the replicated dense layers OOM.
+        - --enable-expert-parallel
+        - --tensor-parallel-size=8
+        # --- recipe b300 profile / hardware_overrides.blackwell ---
+        - --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}
+        - --attention_config.use_fp4_indexer_cache=True
+        # FP8-only kernel. It comes from the default variant's blackwell override,
+        # so it must be dropped if you ever switch to nvidia/DeepSeek-V4-Pro-NVFP4 —
+        # the recipe states the NVFP4 experts do not support deep_gemm_mega_moe.
+        - --moe-backend=deep_gemm_mega_moe
+        # --- recipe feature: tool_calling ---
+        # deepseek_v4 tokenizer-mode is what applies the built-in V4 encoding.
+        - --tokenizer-mode=deepseek_v4
+        - --tool-call-parser=deepseek_v4
+        - --enable-auto-tool-choice
+        # --- recipe feature: reasoning ---
+        # three effort levels, selected per-request via chat_template_kwargs
+        # {"thinking": true, "reasoning_effort": "high"|"max"}. Recipe's suggested
+        # sampling for this model: temperature 1.0, top_p 1.0.
+        - --reasoning-parser=deepseek_v4
+        - --served-model-name=deepseek-ai/DeepSeek-V4-Pro
+        # Not set, because the recipe's b300 profile does not set them:
+        # --gpu-memory-utilization, --max-model-len, --max-num-batched-tokens,
+        # --max-num-seqs. Its env block for b300 is likewise empty.
+        env:
+        # house additions, not from the recipe — single-node TP8 stays on NVLink,
+        # there is no EFA/RDMA path in this deployment
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_P2P_LEVEL
+          value: "NVL"
+        - name: NCCL_NVLS_ENABLE
+          value: "1"
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "160"
+            # node has 4 TiB; same value the Kimi-K3 b300 deployment runs with.
+            # Must also cover the 500Gi /dev/shm emptyDir below.
+            memory: 3072Gi
+            # container filesystem only — weights land on the hostPath volume
+            ephemeral-storage: 300Gi
+            nvidia.com/gpu: "8"
+        # 864.7 GB of weights on first start, plus torch.compile warmup. 100 min
+        # after the initial delay, interpolated between this repo's two existing
+        # budgets: 756 GB / 90 min (GLM-5.2 p5en) and 1.56 TB / 150 min (Kimi-K3 b300).
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 180
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 200
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 60
+          timeoutSeconds: 30
+          failureThreshold: 5
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: cache-volume
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      # node-local NVMe (instance-store RAID); same path the other DeepSeek
+      # manifests use, so the HF cache is shared per-repo-id on a warm node
+      - name: cache-volume
+        hostPath:
+          path: /mnt/k8s-disks/0/models/deepseek
+          type: DirectoryOrCreate
+      # replaces the recipe's docker --ipc=host; TP8 workers talk over shm
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "500Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-v4-pro-vllm
+spec:
+  selector:
+    app: deepseek-v4-pro-vllm
+    engine: vllm
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: http
+  type: ClusterIP
